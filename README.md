@@ -1,2 +1,204 @@
 # IT-News-Classification-Application
-Application to retrieve news from several IT sources, classify them according to categories and display them on a UI
+Application to retrieve news from several IT sources, classify them according to categories and display them on a UI.
+
+## Project Structure
+
+```
+IT-News-Classification-Application/
+├── app/
+│   ├── database.py       # SQLite engine, session factory, get_db() dependency
+│   ├── models.py         # SQLAlchemy ORM model (Article table)
+│   ├── schemas.py        # Pydantic schemas for API input/output validation
+│   └── routes/           # FastAPI route handlers (to be added)
+├── streamlit_app.py      # Streamlit UI (to be added)
+└── requirements.txt      # Dependencies (to be added)
+```
+
+## Technical Decisions
+
+### Framework — FastAPI + Streamlit
+FastAPI handles the REST API (`/ingest`, `/retrieve`) due to its native async support, automatic request validation via Pydantic, and auto-generated docs. Streamlit is used for the UI — it allows building a functional web dashboard in pure Python with minimal overhead.
+
+### Database — SQLite + SQLAlchemy ORM
+SQLite keeps the project self-contained with no external dependencies (no database server to run). SQLAlchemy ORM is used to interact with the DB in Python without writing raw SQL, and makes it straightforward to swap to PostgreSQL later if needed.
+
+**Single table design (PoC decision):** A single `articles` table stores all news items, already classified. Articles are classified and scored before being written to the database — meaning only enriched, processed records ever land in storage. This keeps the schema simple and queries fast for a proof of concept.
+
+In a production scenario, a better approach would be a **two-table design**:
+- A **landing table** receives raw articles immediately on ingestion, with no processing delay. This ensures data is never lost even if classification fails, and allows the ingest endpoint to respond fast.
+- A **processed table** receives articles after classification, enriched with scores and category.
+- The landing table can be cleaned up after a configurable retention period (e.g. delete records older than 7 days) to prevent unbounded growth.
+
+This separation also makes it easier to reprocess articles if the classifier changes, since the raw data is always available.
+
+### Classification — Zero-shot (`valhalla/distilbart-mnli-12-3`)
+No labelled dataset was provided for this task, making supervised training impractical. Even if one were available, collecting a dataset large and diverse enough to outperform modern pre-trained models would require significant time and resources. Zero-shot models have advanced to the point where they generalise remarkably well across domains out of the box — making them the pragmatic and effective choice here.
+
+Zero-shot classification allows us to define meaningful IT-manager-relevant categories (e.g. "system outage", "cybersecurity incident") without needing any labelled training data. The `valhalla/distilbart-mnli-12-3` model is a distilled version of BART-large-MNLI — a good balance between accuracy and speed for local/CPU use.
+
+The classifier assigns a weighted importance score (0–1) based on predefined labels and their relevance to IT managers:
+
+| Label                                    | Weight |
+|------------------------------------------|--------|
+| `cybersecurity incident or data breach`  | 1.0    |
+| `system outage or service disruption`    | 1.0    |
+| `critical software bug or vulnerability` | 0.9    |
+| `software release or patch`              | 0.5    |
+| `general technology news`                | 0.2    |
+
+### Ranking — Importance × Recency
+Each article is ranked by `final_score = importance_score × recency_score`, where:
+- `importance_score` comes from the weighted zero-shot classifier output
+- `recency_score = e^(-λ * hours_since_published)` — exponential decay with a ~24h half-life
+
+Both scores are computed and stored **at ingestion time**, making the `/retrieve` endpoint fully deterministic regardless of when it is called.
+
+### News Sources — RSS feeds
+All sources (Reddit, Ars Technica, The Hacker News, Tom's Hardware) are fetched via RSS feeds — no API credentials required, and RSS is universally supported. The fetcher uses a **base class pattern** so new sources can be added by implementing a single `fetch()` method, with no changes to existing code.
+
+| Source              | Feed                                                        |
+|---------------------|-------------------------------------------------------------|
+| Reddit r/sysadmin   | `https://www.reddit.com/r/sysadmin.rss`                    |
+| Ars Technica        | `https://feeds.arstechnica.com/arstechnica/technology-lab` |
+| The Hacker News     | `https://feeds.feedburner.com/TheHackersNews`               |
+| Tom's Hardware      | `https://www.tomshardware.com/feeds/all`                    |
+
+### Fetch Interval — Every 5 minutes
+The background fetcher runs as a FastAPI startup task, polling all sources every 5 minutes. This provides near real-time updates while avoiding excessive load on the sources.
+
+### `/retrieve` scope — all filtered articles
+Both articles fetched from RSS sources and articles injected via `/ingest` go through the same `classify_and_save()` pipeline and are stored in the same table. The `/retrieve` endpoint returns **all** articles marked `is_filtered = True`, regardless of their origin.
+
+This is a deliberate design choice: the system is a unified newsfeed — the test harness articles and the live RSS articles are treated equally. The spec says `/retrieve` should return "only the events your system decided to keep", without restricting by source.
+
+One implication: since the background fetcher continuously adds new articles, the result set of `/retrieve` can grow between calls. The **ordering is always deterministic** (scores are fixed at ingestion time), but **membership may grow** as new articles arrive. This is expected behaviour for a live newsfeed system.
+
+---
+
+## Database Layer
+
+### `app/database.py`
+Sets up the SQLite database using SQLAlchemy. Provides:
+- `engine` — connects to `news.db` at the project root
+- `SessionLocal` — session factory; each request gets its own session
+- `get_db()` — FastAPI dependency that yields a session and closes it after use
+
+### `app/models.py`
+Defines the `Article` SQLAlchemy model (single table). Fields:
+
+| Field | Type | Description |
+|------------------|-----------------|------------------------------------------------------|
+| `id` | String (PK) | ID from the source — not auto-generated |
+| `source` | String | e.g. `"reddit"`, `"ars-technica"` |
+| `title` | String | Article headline |
+| `body` | Text (optional) | Article content |
+| `published_at` | DateTime | UTC timestamp from the source |
+| `importance_score` | Float | Weighted score from zero-shot classifier (0–1) |
+| `recency_score` | Float | Exponential decay based on `published_at` (0–1) |
+| `final_score` | Float | `importance * recency`, used for ranking in `/retrieve` |
+| `is_filtered` | Boolean | `True` if article passed the classifier threshold |
+| `category` | String | Winning label from the classifier |
+| `ingested_at` | DateTime | When the article was received by the system |
+
+### `app/schemas.py`
+Pydantic schemas for request/response validation:
+- `ArticleIngest` — validates incoming data from `POST /ingest`
+- `ArticleResponse` — shapes outgoing data from `GET /retrieve`
+
+Both match the API contract shape: `id`, `source`, `title`, `body`, `published_at`.
+
+---
+
+## Fetcher Layer
+
+### `app/fetcher.py`
+Fetches articles from all registered RSS sources, classifies them, and persists them to the database. Designed for modularity — adding a new source requires only a new subclass with two attributes.
+
+**Key components:**
+
+- `BaseSource` — abstract base class. Every source must implement `fetch() -> List[ArticleIngest]`.
+- `RSSSource(BaseSource)` — shared RSS parsing logic (GUID extraction, HTML stripping, date parsing, error handling). All current sources inherit from this.
+- Concrete sources — each defines only `source_name` and `feed_url`:
+  - `RedditSysadminSource`
+  - `ArsTechnicaSource`
+  - `HackerNewsSource`
+  - `TomsHardwareSource`
+- `SOURCES` — a list acting as the source registry. Enable or disable a source by adding or removing it from this list.
+- `FetcherService` — runs an async background loop every 5 minutes, calling `classify_and_save()` for each fetched article.
+
+**Design decisions:**
+- Errors in one source are logged and skipped — other sources are unaffected.
+- Existing articles are overwritten on re-fetch (upsert by ID), so content updates are reflected.
+- The fetcher runs synchronously (no `asyncio.to_thread`) for simplicity. In production, wrapping blocking I/O calls in a thread pool would prevent event loop blocking.
+
+---
+
+## Classifier Layer
+
+### `app/classifier.py`
+Scores each article for relevance to IT managers and persists the result to the database. Called by both the background fetcher and the `/ingest` route.
+
+**Importance score:**
+The zero-shot model returns confidence scores across all labels (summing to 1.0). Each confidence is multiplied by its label weight, and the results are summed to produce `importance_score`:
+
+```
+importance_score = sum(confidence[label] × weight[label])
+```
+
+Since confidences sum to 1.0, the score is naturally bounded:
+- `0.2` — article is entirely general tech news
+- `1.0` — article is entirely a cybersecurity incident or outage
+
+Articles with `importance_score > 0.5` are marked `is_filtered = True` and appear in `/retrieve`.
+
+**Recency score:**
+Exponential decay with a 48-hour half-life:
+```
+recency_score = e^(-λ × hours_since_published)    where λ = ln(2) / 48 ≈ 0.0144
+```
+- At publication: `recency_score = 1.0`
+- After 48h: `recency_score = 0.5`
+- After 96h: `recency_score = 0.25`
+
+**Final score:**
+```
+final_score = importance_score × recency_score
+```
+Used by `/retrieve` to sort articles by importance and freshness combined.
+
+**Design decisions:**
+- **Title only** is fed to the classifier. RSS bodies are often truncated or noisy; the title carries the most reliable signal.
+- **Lazy model loading** — the model is loaded on the first classification call, keeping app startup fast.
+- **Failure handling** — if classification fails, the article is still saved with null scores and `is_filtered = False`. No data is lost.
+- **Shared singleton** — a single `classifier` instance is imported by both the fetcher and the `/ingest` route, so the model is only loaded once.
+- **Category** is the label with the highest weighted score, used for display in the UI.
+
+## Testing
+
+The project separates **unit tests** (fast, no network) from **integration tests** (real HTTP calls to external feeds).
+
+### Running tests
+
+| Command | What it runs |
+|--------------------------------------------------|----------------------------------------------|
+| `pytest tests/test_fetcher.py -v`               | Unit tests only — fast, no network required  |
+| `pytest tests/test_fetcher_integration.py -v`   | Integration tests — hits real RSS feeds      |
+| `pytest -m integration -v`                      | All integration tests across all test files  |
+| `pytest -m "not integration" -v`                | All unit tests, skipping integration tests   |
+| `pytest -v`                                     | Full test suite (unit + integration)         |
+
+### Unit tests (`tests/test_fetcher.py`)
+Fast tests that mock `feedparser` — no real HTTP calls are made. Cover:
+- `strip_html` — tag removal, empty input, `None` input, nested tags
+- `parse_date` — uses `published_parsed`, falls back to `updated_parsed`, falls back to now
+- `RSSSource.fetch()` — correct fields, HTML stripping, `None` body, skips entries with no ID, handles fetch errors, multiple entries
+- `SOURCES` registry — all sources have name and URL, names are unique, expected sources are present
+
+### Integration tests (`tests/test_fetcher_integration.py`)
+Slower tests that make real HTTP requests to each RSS feed. Each source is verified to:
+- Return at least one article
+- Populate all required fields (`id`, `source`, `title`, `published_at`)
+- Return a body with no HTML tags
+- Return `published_at` as a valid UTC datetime
+
+> **Note:** Integration tests require an active internet connection and will fail if a feed is temporarily down.
