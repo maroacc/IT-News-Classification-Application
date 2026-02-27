@@ -22,3 +22,12 @@ class ArticleResponse(BaseModel):
 
     # Allows Pydantic to read data directly from SQLAlchemy model instances
     model_config = ConfigDict(from_attributes=True)
+
+
+class ArticleFullResponse(ArticleResponse):
+    """Extended shape for the /articles endpoint — includes classification fields for the UI."""
+    importance_score: Optional[float] = None
+    recency_score: Optional[float] = None
+    final_score: Optional[float] = None
+    category: Optional[str] = None
+    ingested_at: Optional[datetime] = None

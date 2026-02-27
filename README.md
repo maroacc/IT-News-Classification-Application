@@ -175,30 +175,49 @@ Used by `/retrieve` to sort articles by importance and freshness combined.
 
 ## Testing
 
-The project separates **unit tests** (fast, no network) from **integration tests** (real HTTP calls to external feeds).
+The project separates **unit tests** (fast, no network, no model) from **integration tests** (real HTTP calls or real ML model).
 
 ### Running tests
 
-| Command | What it runs |
-|--------------------------------------------------|----------------------------------------------|
-| `pytest tests/test_fetcher.py -v`               | Unit tests only — fast, no network required  |
-| `pytest tests/test_fetcher_integration.py -v`   | Integration tests — hits real RSS feeds      |
-| `pytest -m integration -v`                      | All integration tests across all test files  |
-| `pytest -m "not integration" -v`                | All unit tests, skipping integration tests   |
-| `pytest -v`                                     | Full test suite (unit + integration)         |
+| Command                                                | What it runs                                         |
+|--------------------------------------------------------|------------------------------------------------------|
+| `pytest tests/test_fetcher.py -v`                     | Fetcher unit tests — mocked feedparser               |
+| `pytest tests/test_routes.py -v`                      | Route unit tests — mocked classifier, in-memory DB   |
+| `pytest tests/test_classifier.py -v`                  | Classifier unit tests — mocked ML pipeline           |
+| `pytest -m "not integration" -v`                      | All unit tests (fast, no network, no model)          |
+| `pytest tests/test_fetcher_integration.py -v`         | Fetcher integration — hits real RSS feeds            |
+| `pytest tests/test_routes_integration.py -v`          | Route integration — real classifier, in-memory DB    |
+| `pytest tests/test_classifier_integration.py -v`      | Classifier integration — loads real ML model         |
+| `pytest -m integration -v`                            | All integration tests                                |
+| `pytest -v`                                           | Full test suite (unit + integration)                 |
 
-### Unit tests (`tests/test_fetcher.py`)
-Fast tests that mock `feedparser` — no real HTTP calls are made. Cover:
-- `strip_html` — tag removal, empty input, `None` input, nested tags
-- `parse_date` — uses `published_parsed`, falls back to `updated_parsed`, falls back to now
-- `RSSSource.fetch()` — correct fields, HTML stripping, `None` body, skips entries with no ID, handles fetch errors, multiple entries
-- `SOURCES` registry — all sources have name and URL, names are unique, expected sources are present
+### Unit tests
 
-### Integration tests (`tests/test_fetcher_integration.py`)
-Slower tests that make real HTTP requests to each RSS feed. Each source is verified to:
-- Return at least one article
-- Populate all required fields (`id`, `source`, `title`, `published_at`)
-- Return a body with no HTML tags
-- Return `published_at` as a valid UTC datetime
+**`tests/test_fetcher.py`** — mocks `feedparser`, no HTTP calls. Covers:
+- `strip_html`, `parse_date`, `RSSSource.fetch()`, `SOURCES` registry
 
-> **Note:** Integration tests require an active internet connection and will fail if a feed is temporarily down.
+**`tests/test_classifier.py`** — mocks the ML pipeline. Covers:
+- `_compute_recency`, `_compute_importance`, `classify_and_save`
+
+**`tests/test_routes.py`** — mocks the classifier, uses an in-memory SQLite database. Covers:
+- `POST /ingest` — acknowledgment, batch count, validation errors, classifier called per article
+- `GET /retrieve` — filtering, ordering, contract response shape (no classification fields leaked)
+- `GET /articles` — full schema with classification fields, consistent ordering with `/retrieve`
+
+#### Note on in-memory SQLite and StaticPool
+
+Route tests use `sqlite:///:memory:` for speed and isolation — each test gets a fresh database that disappears when the test ends, with no files left on disk.
+
+The catch: SQLite in-memory databases are **connection-scoped**. Each new connection gets its own private block of RAM, so a second connection sees a completely empty database even if the first one already created tables and inserted data. This matters because FastAPI runs route handlers in a thread pool, which can open a new database connection separate from the one the test fixture used.
+
+The fix is SQLAlchemy's `StaticPool`: instead of a pool of multiple connections, it keeps a single connection and returns it every time one is requested. All parties — the fixture, the route handler, the test assertions — share the same connection, and therefore the same in-memory database.
+
+### Integration tests
+
+**`tests/test_fetcher_integration.py`** — real HTTP requests to each RSS feed. Verifies each source returns valid articles with all required fields.
+
+**`tests/test_classifier_integration.py`** — loads the actual `valhalla/distilbart-mnli-12-3` model. Verifies relevant headlines pass the filter and irrelevant ones don't.
+
+**`tests/test_routes_integration.py`** — real classifier + in-memory DB. Tests the full ingest → classify → retrieve pipeline end-to-end, including determinism and correct filtering.
+
+> **Note:** Integration tests require an active internet connection (fetcher) or will trigger model loading (~300MB download on first run, cached after). Run `pytest -m "not integration"` to skip them.
