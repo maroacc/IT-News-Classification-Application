@@ -6,13 +6,127 @@ Application to retrieve news from several IT sources, classify them according to
 ```
 IT-News-Classification-Application/
 ├── app/
+│   ├── classifier.py     # Zero-shot classifier, scoring, DB persistence
 │   ├── database.py       # SQLite engine, session factory, get_db() dependency
+│   ├── fetcher.py        # RSS fetcher, background loop, source registry
 │   ├── models.py         # SQLAlchemy ORM model (Article table)
 │   ├── schemas.py        # Pydantic schemas for API input/output validation
-│   └── routes/           # FastAPI route handlers (to be added)
-├── streamlit_app.py      # Streamlit UI (to be added)
-└── requirements.txt      # Dependencies (to be added)
+│   └── routes/
+│       └── articles.py   # /ingest, /retrieve, /articles route handlers
+├── tests/
+│   ├── test_classifier.py            # Classifier unit tests
+│   ├── test_classifier_integration.py
+│   ├── test_fetcher.py               # Fetcher unit tests
+│   ├── test_fetcher_integration.py
+│   ├── test_routes.py                # Route unit tests
+│   └── test_routes_integration.py
+├── main.py               # FastAPI app, lifespan (DB init + background fetcher)
+├── requirements.txt      # Pinned dependencies
+├── pytest.ini            # Pytest config (integration marker)
+└── news.db               # SQLite database (created on first run)
 ```
+
+---
+
+## Getting Started
+
+### Prerequisites
+- Python 3.12
+- pip
+
+### Setup
+
+```bash
+# Create and activate a virtual environment
+python -m venv .venv
+.venv\Scripts\activate        # Windows
+source .venv/bin/activate     # macOS/Linux
+
+# Install dependencies
+pip install -r requirements.txt
+```
+
+### Running the app
+
+```bash
+uvicorn main:app --reload
+```
+
+On startup the app will:
+1. Create `news.db` at the project root (if it doesn't exist)
+2. Start a background fetcher that polls all RSS sources every 5 minutes
+3. Classify and store each article automatically
+
+The API will be available at `http://localhost:8000`.
+Interactive API docs (Swagger UI) at `http://localhost:8000/docs`.
+
+---
+
+## API Reference
+
+### `POST /ingest`
+Ingest a batch of raw articles for classification and storage.
+
+**Request body** — JSON array of article objects:
+```json
+[
+  {
+    "id": "unique-string",
+    "source": "source-name",
+    "title": "Article headline",
+    "body": "Optional article body",
+    "published_at": "2025-01-01T12:00:00Z"
+  }
+]
+```
+
+**Response** — HTTP 200:
+```json
+{ "status": "ok", "received": 1 }
+```
+
+---
+
+### `GET /retrieve`
+Returns all articles that passed the relevance filter, sorted by score descending. Response matches the API contract shape exactly.
+
+**Response** — JSON array:
+```json
+[
+  {
+    "id": "unique-string",
+    "source": "source-name",
+    "title": "Article headline",
+    "body": "Optional article body",
+    "published_at": "2025-01-01T12:00:00Z"
+  }
+]
+```
+
+---
+
+### `GET /articles`
+Same filtering and ordering as `/retrieve` but returns the full internal schema including classification fields. Intended for the UI.
+
+**Response** — JSON array with additional fields:
+```json
+[
+  {
+    "id": "unique-string",
+    "source": "source-name",
+    "title": "Article headline",
+    "body": "Optional article body",
+    "published_at": "2025-01-01T12:00:00Z",
+    "importance_score": 0.87,
+    "recency_score": 0.94,
+    "final_score": 0.82,
+    "category": "cybersecurity incident or data breach",
+    "ingested_at": "2025-01-01T12:01:00Z"
+  }
+]
+```
+
+---
 
 ## Technical Decisions
 
@@ -65,6 +179,35 @@ All sources (Reddit, Ars Technica, The Hacker News, Tom's Hardware) are fetched 
 
 ### Fetch Interval — Every 5 minutes
 The background fetcher runs as a FastAPI startup task, polling all sources every 5 minutes. This provides near real-time updates while avoiding excessive load on the sources.
+
+### RSS Feed Snapshot Model and Coverage
+RSS feeds are static XML files served by the publisher. Each fetch returns a **snapshot** of whatever articles the site currently exposes — typically their 20–50 most recent items. There is no pagination and no way to request articles beyond that window. The number of articles per fetch is entirely controlled by the publisher:
+
+| Source | Articles exposed per fetch |
+|---|---|
+| The Hacker News | ~50 |
+| Tom's Hardware | ~25 |
+| Reddit r/sysadmin | ~25 |
+| Ars Technica | ~20 |
+
+Each fetch cycle, new articles that have appeared since the last fetch will be present in the snapshot while old ones will have dropped off. As long as new articles appear slower than the feed rotates, no articles are missed. For IT news sites, a few articles per hour is typical — well within a 5-minute polling interval.
+
+**What could be missed:** if a site published articles faster than the feed window rotates between fetches, the oldest items could drop off before we catch them. In practice this does not happen for IT news sources. A more robust solution would track the last seen article ID per source and alert if gaps are detected — but this is unnecessary overhead for the current use case.
+
+### Filter Pass Rate by Source
+After the first fetch cycle, the classifier accepted the following proportions per source:
+
+| Source | Fetched | Passed filter | Pass rate |
+|---|---|---|---|
+| The Hacker News | 50 | 48 | 96% |
+| Tom's Hardware | 26 | 17 | 65% |
+| Reddit r/sysadmin | 25 | 23 | 92% |
+| Ars Technica | 20 | 15 | 75% |
+| **Total** | **121** | **103** | **85%** |
+
+These rates reflect how well each source aligns with IT manager relevance. The Hacker News and Reddit r/sysadmin score very high because their content is almost entirely security incidents, outages, and critical bugs — exactly the categories with the highest label weights. Tom's Hardware covers general hardware reviews and product announcements alongside IT-relevant content, so more articles fall below the threshold. Ars Technica similarly mixes general technology coverage with IT-critical reporting.
+
+This also serves as a sanity check on the classifier: a source like The Hacker News passing 96% makes intuitive sense, while a general tech publication passing everything would indicate the filter is too permissive.
 
 ### `/retrieve` scope — all filtered articles
 Both articles fetched from RSS sources and articles injected via `/ingest` go through the same `classify_and_save()` pipeline and are stored in the same table. The `/retrieve` endpoint returns **all** articles marked `is_filtered = True`, regardless of their origin.
