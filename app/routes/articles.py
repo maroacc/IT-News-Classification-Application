@@ -5,7 +5,8 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from app.classifier import classifier
-from app.database import get_db
+from app.database import SessionLocal, get_db
+from app.fetcher import FetcherService
 from app.models import Article
 from app.schemas import ArticleFullResponse, ArticleIngest, ArticleResponse
 
@@ -41,6 +42,13 @@ def retrieve(db: Session = Depends(get_db)):
     )
     logger.info(f"[/retrieve] Returning {len(articles)} filtered articles")
     return articles
+
+
+@router.post("/fetch")
+def trigger_fetch():
+    """Trigger an immediate fetch and classification of all RSS sources. Blocks until complete."""
+    FetcherService()._fetch_all(SessionLocal, classifier)
+    return {"status": "ok"}
 
 
 @router.get("/articles", response_model=List[ArticleFullResponse])

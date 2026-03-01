@@ -9,6 +9,7 @@ import streamlit as st
 # ─────────────────────────────────────────────────────────────────────────────
 
 API_URL = "http://localhost:8000/articles"
+FETCH_URL = "http://localhost:8000/fetch"
 REFRESH_INTERVAL = 300  # seconds — matches fetcher interval
 
 CATEGORIES = [
@@ -37,6 +38,20 @@ CATEGORY_EMOJI = {
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
+
+def trigger_fetch() -> bool:
+    """Call POST /fetch to run an immediate fetch+classify cycle. Returns True on success."""
+    try:
+        response = requests.post(FETCH_URL, timeout=120)
+        response.raise_for_status()
+        return True
+    except requests.exceptions.ConnectionError:
+        st.error("Cannot reach the API at http://localhost:8000.")
+        return False
+    except Exception as e:
+        st.error(f"Fetch failed: {e}")
+        return False
+
 
 def get_articles() -> list[dict]:
     """Fetch articles from the API. Returns an empty list and shows an error on failure."""
@@ -107,6 +122,8 @@ with st.sidebar:
     st.title("⚙️ Controls")
 
     if st.button("🔄 Refresh now", use_container_width=True):
+        with st.spinner("Fetching latest articles..."):
+            trigger_fetch()
         st.rerun()
 
     last_updated = datetime.fromtimestamp(st.session_state.last_refresh).strftime("%H:%M:%S")
