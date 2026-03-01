@@ -151,7 +151,7 @@ st.session_state.last_refresh = time.time()
 with st.sidebar:
     st.title("⚙️ Controls")
 
-    if st.button("🔄 Refresh now", use_container_width=True):
+    if st.button("Refresh now", icon=":material/refresh:", use_container_width=True):
         with st.spinner("Fetching latest articles..."):
             trigger_fetch()
         st.rerun()
@@ -180,7 +180,7 @@ with st.sidebar:
 
     sort_by = st.radio(
         "Sort by",
-        options=["Importance (default)", "Most recent"],
+        options=["Final score (default)", "Importance", "Most recent"],
     )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -193,9 +193,11 @@ filtered = [
     and (a.get("source") in selected_sources or not selected_sources)
 ]
 
-if sort_by == "Most recent":
+if sort_by == "Importance":
+    filtered.sort(key=lambda a: a.get("importance_score") or 0.0, reverse=True)
+elif sort_by == "Most recent":
     filtered.sort(key=lambda a: a.get("published_at") or "", reverse=True)
-# "Importance (default)" preserves the API order (final_score desc)
+# "Final score (default)" preserves the API order (final_score desc)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Page title + summary metrics
@@ -203,23 +205,13 @@ if sort_by == "Most recent":
 
 st.title("📡 IT News Feed")
 
-col1, col2, col3 = st.columns(3)
+if filtered:
+    most_recent_str = max(a.get("published_at") or "" for a in filtered)
+    age_label = time_ago(most_recent_str) if most_recent_str else "—"
+else:
+    age_label = "—"
 
-with col1:
-    st.metric("Articles shown", len(filtered))
-
-with col2:
-    top_score = max((a.get("final_score") or 0.0 for a in filtered), default=0.0)
-    st.metric("Highest score", f"{top_score:.2f}")
-
-with col3:
-    if filtered:
-        most_recent_str = max(a.get("published_at") or "" for a in filtered)
-        age_label = time_ago(most_recent_str) if most_recent_str else "—"
-    else:
-        age_label = "—"
-    st.metric("Most recent", age_label)
-
+st.caption(f"**{len(filtered)}** articles &nbsp;·&nbsp; most recent: **{age_label}**")
 st.divider()
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -236,18 +228,30 @@ else:
         title = article.get("title") or "Untitled"
         body = article.get("body") or ""
         snippet = (body[:200] + "…") if len(body) > 200 else body
+        importance_score = float(article.get("importance_score") or 0.0)
+        recency_score = float(article.get("recency_score") or 0.0)
         final_score = float(article.get("final_score") or 0.0)
         published_at = article.get("published_at") or ""
 
+        url = article.get("id") or ""
+        title_md = f"[{title}]({url})" if url.startswith("http") else title
+
         with st.container():
-            st.markdown(
-                f"{emoji} **{category}** &nbsp;·&nbsp; "
-                f"`{source}` &nbsp;·&nbsp; *{time_ago(published_at)}*"
-            )
-            st.markdown(f"### {title}")
-            st.progress(min(final_score, 1.0), text=f"Score: {final_score:.3f}")
-            if snippet:
-                st.caption(snippet)
+            left, right = st.columns([5, 1])
+            with left:
+                st.markdown(
+                    f"{emoji} **{category}** &nbsp;·&nbsp; "
+                    f"`{source}` &nbsp;·&nbsp; *{time_ago(published_at)}*"
+                )
+                st.markdown(f"### {title_md}")
+                if snippet:
+                    st.caption(snippet)
+            with right:
+                st.caption(
+                    f"Imp &nbsp;`{importance_score:.2f}`  \n"
+                    f"Rec &nbsp;`{recency_score:.2f}`  \n"
+                    f"Final `{final_score:.2f}`"
+                )
             st.divider()
 
 # ─────────────────────────────────────────────────────────────────────────────

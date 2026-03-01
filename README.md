@@ -73,7 +73,16 @@ streamlit run streamlit_app.py
 
 The dashboard will open automatically in your browser at `http://localhost:8501`.
 
-It calls `GET /articles` to display classified articles in a card layout, with sidebar filters for category and source, a sort toggle, and auto-refresh every 5 minutes. The API server must be running first.
+It calls `GET /articles` to display classified articles in a card layout. The API server must be running first.
+
+**Sidebar controls:**
+- **Refresh now** — triggers an immediate fetch and classification cycle
+- **Auto-refresh** — toggle to automatically reload the feed every 5 minutes
+- **Category filter** — multiselect to show/hide specific categories
+- **Source filter** — multiselect to show/hide specific RSS sources
+- **Sort by** — choose between *Final score* (importance × recency, default), *Importance* (classifier score only), or *Most recent* (publication date)
+
+**Article cards** show the category emoji, source, time since publication, title, a 200-character body snippet, and three scores (importance, recency, final) displayed compactly on the right side of the card.
 
 ---
 
@@ -148,6 +157,15 @@ Same filtering and ordering as `/retrieve` but returns the full internal schema 
 ### Framework — FastAPI + Streamlit
 FastAPI handles the REST API (`/ingest`, `/retrieve`) due to its native async support, automatic request validation via Pydantic, and auto-generated docs. Streamlit is used for the UI — it allows building a functional web dashboard in pure Python with minimal overhead.
 
+**Streamlit is suitable for this PoC but not for production with multiple users.** Key limitations:
+
+- **Full page re-render on every interaction** — Streamlit has no concept of partial updates. Any filter change, button click, or auto-refresh reruns the entire Python script from top to bottom and redraws the whole page. For a single user this is acceptable; for many concurrent users it becomes slow and resource-heavy.
+- **No true multi-user session isolation** — Streamlit's session state is per-browser-tab, but the server runs a single Python process. Under concurrent load, blocking operations (like the auto-refresh sleep) affect all sessions.
+- **Limited UI customisation** — layout, styling, and interactivity are constrained by what Streamlit exposes. Building a production-grade newsfeed UI with real-time updates, pagination, or user preferences would require a proper frontend framework (React, Vue, etc.).
+- **Not designed for horizontal scaling** — Streamlit apps are stateful and tied to a single process, making them hard to scale behind a load balancer.
+
+For the intended use case — **a single IT manager checking the feed** — these limitations are irrelevant. Streamlit delivers a functional, readable dashboard with minimal code, which is exactly what a PoC requires.
+
 ### Database — SQLite + SQLAlchemy ORM
 SQLite keeps the project self-contained with no external dependencies (no database server to run). SQLAlchemy ORM is used to interact with the DB in Python without writing raw SQL, and makes it straightforward to swap to PostgreSQL later if needed.
 
@@ -167,13 +185,16 @@ Zero-shot classification allows us to define meaningful IT-manager-relevant cate
 
 The classifier assigns a weighted importance score (0–1) based on predefined labels and their relevance to IT managers:
 
-| Label                                    | Weight |
-|------------------------------------------|--------|
-| `cybersecurity incident or data breach`  | 1.0    |
-| `system outage or service disruption`    | 1.0    |
-| `critical software bug or vulnerability` | 0.9    |
-| `software release or patch`              | 0.5    |
-| `general technology news`                | 0.2    |
+| Label                                       | Weight |
+|---------------------------------------------|--------|
+| `cybersecurity incident or data breach`     | 1.0    |
+| `system outage or service disruption`       | 1.0    |
+| `critical software bug or vulnerability`    | 0.9    |
+| `software release or patch`                 | 0.5    |
+| `general technology news`                   | 0.2    |
+| `IT community discussion or advice request` | 0.15   |
+
+The sixth label (`IT community discussion or advice request`) was added after analysis revealed that Reddit r/sysadmin posts — which are forum discussions, not news articles — were being forced into high-weight categories like "system outage" and passing the filter incorrectly. A dedicated low-weight label (0.15, below the 0.5 threshold) gives the model a correct bucket for community content, causing it to be filtered out automatically.
 
 ### Model loading — eager, background thread
 
@@ -299,7 +320,8 @@ Fetches articles from all registered RSS sources, classifies them, and persists 
 **Design decisions:**
 - Errors in one source are logged and skipped — other sources are unaffected.
 - Existing articles are overwritten on re-fetch (upsert by ID), so content updates are reflected.
-- The fetcher runs synchronously (no `asyncio.to_thread`) for simplicity. In production, wrapping blocking I/O calls in a thread pool would prevent event loop blocking.
+- `_fetch_all` runs inside `loop.run_in_executor(None, ...)` so the blocking RSS + ML work happens in a thread pool and never stalls FastAPI's event loop. Incoming requests are handled normally while a fetch cycle is in progress.
+- A 5-second delay is inserted before the first fetch cycle at startup, giving the server time to finish initialising and become reachable before the first (potentially slow) classification run begins.
 
 ---
 
@@ -337,7 +359,7 @@ final_score = importance_score × recency_score
 Used by `/retrieve` to sort articles by importance and freshness combined.
 
 **Design decisions:**
-- **Title only** is fed to the classifier. RSS bodies are often truncated or noisy; the title carries the most reliable signal.
+- **Title + body snippet** is fed to the classifier. The article title alone is often insufficient to distinguish real news from community forum posts — a Reddit post titled *"HELP PLEASE! Had my first real email compromise incident this week"* is indistinguishable from a news headline without the body context. The first 300 characters of the body are appended to the title before classification, giving the model enough context to detect the conversational tone of forum posts. 300 characters was chosen as a balance between signal and inference speed.
 - **Lazy model loading** — the model is loaded on the first classification call, keeping app startup fast.
 - **Failure handling** — if classification fails, the article is still saved with null scores and `is_filtered = False`. No data is lost.
 - **Shared singleton** — a single `classifier` instance is imported by both the fetcher and the `/ingest` route, so the model is only loaded once.
@@ -391,3 +413,34 @@ The fix is SQLAlchemy's `StaticPool`: instead of a pool of multiple connections,
 **`tests/test_routes_integration.py`** — real classifier + in-memory DB. Tests the full ingest → classify → retrieve pipeline end-to-end, including determinism and correct filtering.
 
 > **Note:** Integration tests require an active internet connection (fetcher) or will trigger model loading (~300MB download on first run, cached after). Run `pytest -m "not integration"` to skip them.
+
+---
+
+## Potential Improvements
+
+### Classifier
+- **Weighted final score formula** — the current formula `final_score = importance_score × recency_score` gives recency equal multiplicative power. A weighted sum like `0.7 × importance + 0.3 × recency` would let importance dominate ranking more explicitly, keeping older but highly relevant articles more visible.
+- **Longer body context** — the classifier currently uses the first 300 characters of the body. Using more (e.g. 512 tokens worth) would give the model more signal, at the cost of slower inference.
+- **Re-classification without DB wipe** — changing the classifier (new labels, new weights) currently requires deleting the database and re-fetching everything. A `/reclassify` endpoint that reruns the classifier on all stored articles without re-fetching would make iteration faster.
+- **Confidence threshold per label** — instead of a single global importance threshold, each label could have its own minimum confidence to pass, giving finer control over which types of events are surfaced.
+
+### Data sources
+- **Reddit r/sysadmin** — even with the new "IT community discussion" category, some Reddit posts still slip through because their titles resemble news headlines. This source could be removed entirely, or a higher per-source confidence threshold could be applied to reduce noise.
+- **More sources** — adding sources like BleepingComputer, Dark Reading, or vendor security bulletins would improve coverage of cybersecurity and software vulnerability news specifically.
+- **Source management from the UI** — currently, adding or removing RSS sources requires editing `app/fetcher.py` and restarting the server. A source management page in the UI would let the IT manager add any RSS feed URL, name it, and remove sources they find noisy — all without touching code.
+- **Full article scraping** — RSS bodies are often truncated. Scraping the full article text would give the classifier much richer context for difficult cases.
+
+### Database
+- **Two-table design** — separate raw ingestion from classified storage (see the existing note in the Database section). This would allow re-classification without data loss and make the ingest endpoint faster.
+- **PostgreSQL** — replacing SQLite with PostgreSQL would support concurrent writes, connection pooling, and horizontal scaling. SQLAlchemy's ORM means this is a one-line change to the connection string.
+- **Retention policy** — old articles accumulate indefinitely. A scheduled cleanup job deleting articles older than N days would keep the database from growing unboundedly.
+
+### API & infrastructure
+- **Docker** — containerising the API and Streamlit app would make deployment reproducible and remove the need to manage the virtual environment manually. A `docker-compose.yml` could start both services with a single command and enforce startup order.
+- **Authentication** — the API currently has no authentication. Any process that can reach port 8000 can ingest or retrieve articles. Adding an API key header would be the minimal production requirement.
+- **Alerting** — for a real IT manager use case, high-priority articles (e.g. `importance_score > 0.9`) could trigger a notification (email, Slack, PagerDuty) rather than waiting for the user to check the dashboard.
+- **Pagination** — the `/retrieve` and `/articles` endpoints currently return all matching articles. As the database grows, adding `limit` and `offset` query parameters would keep response sizes manageable.
+
+### UI
+- **Replace Streamlit with a proper frontend** — as noted in the framework section, Streamlit rerenders the entire page on every interaction and does not scale to multiple users. A React or Vue frontend calling the FastAPI directly would provide real-time updates, better performance, and full UI flexibility.
+- **Read/unread state** — the dashboard currently shows all articles on every load. Tracking which articles the user has already seen and only surfacing new ones would make the feed much more actionable.

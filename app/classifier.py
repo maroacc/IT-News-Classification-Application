@@ -68,16 +68,21 @@ class ClassifierService:
             logger.info("Model loaded successfully")
         return self._pipeline
 
-    def _compute_importance(self, title: str) -> tuple[float, str]:
+    def _compute_importance(self, title: str, body: str | None = None) -> tuple[float, str]:
         """
-        Run zero-shot classification on the article title.
+        Run zero-shot classification on the article title + body snippet.
+        Including the body gives the model context that makes ambiguous titles
+        (e.g. Reddit advice posts) distinguishable from real news.
 
         Returns:
             importance_score: weighted sum of (confidence × label_weight), range [0.2, 1.0]
             category: the label with the highest weighted score
         """
+        body_snippet = (body or "")[:300].strip()
+        text = f"{title}. {body_snippet}" if body_snippet else title
+
         pipe = self._get_pipeline()
-        result = pipe(title, candidate_labels=list(LABEL_WEIGHTS.keys()))
+        result = pipe(text, candidate_labels=list(LABEL_WEIGHTS.keys()))
 
         # Map each label to its weighted score (confidence × weight)
         weighted_scores = {
@@ -131,7 +136,7 @@ class ClassifierService:
         is_filtered = False
 
         try:
-            importance_score, category = self._compute_importance(article.title)
+            importance_score, category = self._compute_importance(article.title, article.body)
             recency_score = self._compute_recency(article.published_at)
             final_score = importance_score * recency_score
             is_filtered = importance_score > IMPORTANCE_THRESHOLD
