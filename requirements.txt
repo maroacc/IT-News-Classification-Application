@@ -48,3 +48,5 @@ typer-slim==0.24.0
 typing-inspection==0.4.2
 typing_extensions==4.15.0
 uvicorn==0.41.0
+requests>=2.32.0
+streamlit>=1.40.0

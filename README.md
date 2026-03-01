@@ -21,6 +21,7 @@ IT-News-Classification-Application/
 │   ├── test_routes.py                # Route unit tests
 │   └── test_routes_integration.py
 ├── main.py               # FastAPI app, lifespan (DB init + background fetcher)
+├── streamlit_app.py      # Streamlit dashboard (calls GET /articles)
 ├── requirements.txt      # Pinned dependencies
 ├── pytest.ini            # Pytest config (integration marker)
 └── news.db               # SQLite database (created on first run)
@@ -48,6 +49,10 @@ pip install -r requirements.txt
 
 ### Running the app
 
+The application has two components that run in separate terminals.
+
+**Terminal 1 — API server**
+
 ```bash
 uvicorn main:app --reload
 ```
@@ -59,6 +64,16 @@ On startup the app will:
 
 The API will be available at `http://localhost:8000`.
 Interactive API docs (Swagger UI) at `http://localhost:8000/docs`.
+
+**Terminal 2 — Streamlit dashboard**
+
+```bash
+streamlit run streamlit_app.py
+```
+
+The dashboard will open automatically in your browser at `http://localhost:8501`.
+
+It calls `GET /articles` to display classified articles in a card layout, with sidebar filters for category and source, a sort toggle, and auto-refresh every 5 minutes. The API server must be running first.
 
 ---
 
