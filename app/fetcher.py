@@ -152,8 +152,10 @@ class FetcherService:
         classifier: the ClassifierService instance used to score articles
         """
         logger.info("FetcherService started — fetching every %ds", self.interval_seconds)
+        await asyncio.sleep(5)  # let the server finish starting before first fetch
+        loop = asyncio.get_event_loop()
         while True:
-            self._fetch_all(db_factory, classifier)
+            await loop.run_in_executor(None, self._fetch_all, db_factory, classifier)
             await asyncio.sleep(self.interval_seconds)
 
     def _fetch_all(self, db_factory, classifier):

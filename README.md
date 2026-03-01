@@ -175,6 +175,18 @@ The classifier assigns a weighted importance score (0–1) based on predefined l
 | `software release or patch`              | 0.5    |
 | `general technology news`                | 0.2    |
 
+### Model loading — eager, background thread
+
+The ML model (~300MB) is loaded **eagerly at startup** rather than lazily on the first classification request. This avoids an unexpected multi-second stall on the first `/ingest` or `/fetch` call after the server starts.
+
+Loading happens in a **daemon background thread** (`threading.Thread(target=classifier.load, daemon=True).start()`) so the server becomes reachable within seconds. The model finishes loading in parallel — typically ~60s on first run (download + load), near-instant on subsequent runs (cached locally by HuggingFace).
+
+A public `load()` method was added to `ClassifierService` (calling the existing internal `_get_pipeline()`) along with an `is_ready` property, so the startup logic can interact with a clean public API without reaching into private internals.
+
+**`GET /health`** exposes readiness to callers. Returns `{"status": "loading"}` while the model is initialising, and `{"status": "ready"}` once all endpoints are fully operational.
+
+The Streamlit dashboard polls `/health` every 2 seconds on startup and shows a *"ML model is loading…"* spinner instead of a confusing connection error. Once `"ready"` is returned, the dashboard fetches and renders articles normally.
+
 ### Ranking — Importance × Recency
 Each article is ranked by `final_score = importance_score × recency_score`, where:
 - `importance_score` comes from the weighted zero-shot classifier output

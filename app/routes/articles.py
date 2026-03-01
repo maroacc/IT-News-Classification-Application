@@ -15,6 +15,12 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+@router.get("/health")
+def health():
+    """Returns the model loading status. 'loading' until the ML model is ready, then 'ready'."""
+    return {"status": "ready" if classifier.is_ready else "loading"}
+
+
 @router.post("/ingest", status_code=200)
 def ingest(articles: List[ArticleIngest], db: Session = Depends(get_db)):
     """

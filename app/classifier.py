@@ -14,11 +14,12 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 LABEL_WEIGHTS: dict[str, float] = {
-    "cybersecurity incident or data breach":  1.0,
-    "system outage or service disruption":    1.0,
-    "critical software bug or vulnerability": 0.9,
-    "software release or patch":              0.5,
-    "general technology news":                0.2,
+    "cybersecurity incident or data breach":     1.0,
+    "system outage or service disruption":       1.0,
+    "critical software bug or vulnerability":    0.9,
+    "software release or patch":                 0.5,
+    "general technology news":                   0.2,
+    "IT community discussion or advice request": 0.15,
 }
 
 # importance_score = sum(confidence * weight) across all labels
@@ -43,7 +44,17 @@ class ClassifierService:
     """
 
     def __init__(self):
-        self._pipeline = None  # loaded on first use to keep startup fast
+        self._pipeline = None
+        self._ready = False
+
+    def load(self):
+        """Eagerly load the model. Call at startup to avoid a slow first request."""
+        self._get_pipeline()
+        self._ready = True
+
+    @property
+    def is_ready(self) -> bool:
+        return self._ready
 
     def _get_pipeline(self):
         """Load and cache the zero-shot classification pipeline on first call."""

@@ -1,4 +1,5 @@
 import logging
+import threading
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -20,6 +21,9 @@ async def lifespan(app: FastAPI):
     # --- Startup ---
     logger.info("Creating database tables if they don't exist...")
     Base.metadata.create_all(bind=engine)
+
+    logger.info("Loading ML model in background thread...")
+    threading.Thread(target=classifier.load, daemon=True).start()
 
     logger.info("Starting background RSS fetcher...")
     import asyncio

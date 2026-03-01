@@ -10,6 +10,7 @@ import streamlit as st
 
 API_URL = "http://localhost:8000/articles"
 FETCH_URL = "http://localhost:8000/fetch"
+HEALTH_URL = "http://localhost:8000/health"
 REFRESH_INTERVAL = 300  # seconds — matches fetcher interval
 
 CATEGORIES = [
@@ -18,6 +19,7 @@ CATEGORIES = [
     "critical software bug or vulnerability",
     "software release or patch",
     "general technology news",
+    "IT community discussion or advice request",
 ]
 
 SOURCES = [
@@ -28,16 +30,32 @@ SOURCES = [
 ]
 
 CATEGORY_EMOJI = {
-    "cybersecurity incident or data breach":  "🔴",
-    "system outage or service disruption":    "🟠",
-    "critical software bug or vulnerability": "🟡",
-    "software release or patch":              "🔵",
-    "general technology news":                "⚪",
+    "cybersecurity incident or data breach":     "🔴",
+    "system outage or service disruption":       "🟠",
+    "critical software bug or vulnerability":    "🟡",
+    "software release or patch":                 "🔵",
+    "general technology news":                   "⚪",
+    "IT community discussion or advice request": "💬",
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
+
+def check_health() -> str:
+    """
+    Returns 'ready', 'loading', or 'unreachable'.
+    'loading' means the API is up but the ML model hasn't finished loading yet.
+    """
+    try:
+        response = requests.get(HEALTH_URL, timeout=5)
+        response.raise_for_status()
+        return response.json().get("status", "unreachable")
+    except requests.exceptions.ConnectionError:
+        return "unreachable"
+    except Exception:
+        return "unreachable"
+
 
 def trigger_fetch() -> bool:
     """Call POST /fetch to run an immediate fetch+classify cycle. Returns True on success."""
@@ -56,14 +74,10 @@ def trigger_fetch() -> bool:
 def get_articles() -> list[dict]:
     """Fetch articles from the API. Returns an empty list and shows an error on failure."""
     try:
-        response = requests.get(API_URL, timeout=5)
+        response = requests.get(API_URL, timeout=30)
         response.raise_for_status()
         return response.json()
     except requests.exceptions.ConnectionError:
-        st.error(
-            "Cannot reach the API at http://localhost:8000. "
-            "Start it with: `uvicorn main:app --reload`"
-        )
         return []
     except Exception as e:
         st.error(f"Failed to fetch articles: {e}")
@@ -106,6 +120,22 @@ st.set_page_config(
 
 if "last_refresh" not in st.session_state:
     st.session_state.last_refresh = time.time()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Health check — poll until API is reachable and model is loaded
+# ─────────────────────────────────────────────────────────────────────────────
+
+health = check_health()
+
+if health in ("unreachable", "loading"):
+    msg = (
+        "Waiting for the server to start…"
+        if health == "unreachable"
+        else "ML model is loading, this takes ~60s on first run…"
+    )
+    st.info(msg)
+    time.sleep(2)
+    st.rerun()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Fetch data
