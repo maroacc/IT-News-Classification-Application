@@ -117,7 +117,12 @@ class ClassifierService:
 
     def classify_and_save(self, article: ArticleIngest, db: Session) -> Article:
         """
-        Classify an article, compute its scores, and upsert it into the database.
+        Classify an article and upsert it into the database.
+        Only importance_score and category are computed and stored here.
+        recency_score and final_score are computed at retrieve time so they are always fresh.
+
+        If an article with the same ID already exists and its title + body are unchanged,
+        classification is skipped and the existing record is returned as-is.
 
         On classification failure, the article is still saved with null scores
         and is_filtered = False so no data is lost.
@@ -129,24 +134,24 @@ class ClassifierService:
         Returns:
             the saved Article ORM object
         """
+        existing = db.get(Article, article.id)
+        if existing and existing.title == article.title and existing.body == article.body:
+            logger.debug(f"[{article.source}] SKIP '{article.title[:60]}' — unchanged")
+            return existing
+
         importance_score = None
-        recency_score = None
-        final_score = None
         category = None
         is_filtered = False
 
         try:
             importance_score, category = self._compute_importance(article.title, article.body)
-            recency_score = self._compute_recency(article.published_at)
-            final_score = importance_score * recency_score
             is_filtered = importance_score > IMPORTANCE_THRESHOLD
 
-            imp_str = f"{importance_score:.3f}"
-            final_str = f"{final_score:.3f}"
             status = "PASS" if is_filtered else "FAIL"
+            action = "UPDATE" if existing else "NEW"
             logger.info(
-                f"[{article.source}] [{status}] '{article.title[:60]}' "
-                f"(importance={imp_str}, recency={recency_score:.3f}, final={final_str}, category='{category}')"
+                f"[{article.source}] [{action}] [{status}] '{article.title[:60]}' "
+                f"(importance={importance_score:.3f}, category='{category}')"
             )
 
         except Exception as e:
@@ -160,13 +165,10 @@ class ClassifierService:
             published_at=article.published_at,
             url=article.url,
             importance_score=importance_score,
-            recency_score=recency_score,
-            final_score=final_score,
             is_filtered=is_filtered,
             category=category,
         )
 
-        # merge() performs an upsert — inserts if new, updates if ID already exists
         db.merge(db_article)
         db.commit()
 

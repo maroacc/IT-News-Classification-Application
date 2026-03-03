@@ -17,10 +17,9 @@ class Article(Base):
 
     # --- Internal classification fields (populated at ingestion time) ---
     importance_score = Column(Float, nullable=True)  # weighted score from zero-shot classifier (0-1)
-    recency_score = Column(Float, nullable=True)     # exponential decay based on published_at (0-1)
-    final_score = Column(Float, nullable=True)       # importance * recency, used for ranking
     is_filtered = Column(Boolean, default=False)     # True if article passed the classifier threshold
     category = Column(String, nullable=True)         # winning label from the classifier
+    # recency_score and final_score are NOT stored — computed at retrieve time so they are always fresh
 
     # --- Metadata ---
     ingested_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))  # when we received it

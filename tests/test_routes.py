@@ -73,10 +73,8 @@ def insert_article(db, **kwargs) -> Article:
         "source": "test-source",
         "title": "Test Article",
         "body": None,
-        "published_at": datetime(2025, 1, 1, 12, 0, 0, tzinfo=timezone.utc),
+        "published_at": datetime.now(timezone.utc),
         "importance_score": 0.8,
-        "recency_score": 0.9,
-        "final_score": 0.72,
         "is_filtered": True,
         "category": "system outage or service disruption",
     }
@@ -144,8 +142,8 @@ class TestIngest:
 
 class TestRetrieve:
     def test_returns_only_filtered_articles(self, client, db):
-        insert_article(db, id="keep", is_filtered=True,  final_score=0.9)
-        insert_article(db, id="drop", is_filtered=False, final_score=0.3)
+        insert_article(db, id="keep", is_filtered=True)
+        insert_article(db, id="drop", is_filtered=False)
 
         ids = [a["id"] for a in client.get("/retrieve").json()]
 
@@ -153,9 +151,11 @@ class TestRetrieve:
         assert "drop" not in ids
 
     def test_sorted_by_final_score_descending(self, client, db):
-        insert_article(db, id="low",  is_filtered=True, final_score=0.3)
-        insert_article(db, id="high", is_filtered=True, final_score=0.9)
-        insert_article(db, id="mid",  is_filtered=True, final_score=0.6)
+        # All articles are published now (recency ≈ 1.0), so ordering is driven by importance_score
+        now = datetime.now(timezone.utc)
+        insert_article(db, id="low",  is_filtered=True, importance_score=0.3, published_at=now)
+        insert_article(db, id="high", is_filtered=True, importance_score=0.9, published_at=now)
+        insert_article(db, id="mid",  is_filtered=True, importance_score=0.6, published_at=now)
 
         ids = [a["id"] for a in client.get("/retrieve").json()]
 
@@ -199,14 +199,15 @@ class TestRetrieve:
 
 class TestArticlesFull:
     def test_returns_classification_fields(self, client, db):
+        # recency_score and final_score are computed at retrieve time — assert presence and range
         insert_article(db, id="article-1", category="system outage or service disruption",
-                       importance_score=0.8, recency_score=0.9, final_score=0.72)
+                       importance_score=0.8)
         article = client.get("/articles").json()[0]
 
         assert article["category"] == "system outage or service disruption"
         assert article["importance_score"] == pytest.approx(0.8)
-        assert article["recency_score"] == pytest.approx(0.9)
-        assert article["final_score"] == pytest.approx(0.72)
+        assert 0.0 < article["recency_score"] <= 1.0
+        assert 0.0 < article["final_score"] <= 1.0
 
     def test_excludes_non_filtered_articles(self, client, db):
         insert_article(db, id="filtered",     is_filtered=True)
@@ -218,8 +219,9 @@ class TestArticlesFull:
         assert "not-filtered" not in ids
 
     def test_same_ordering_as_retrieve(self, client, db):
-        insert_article(db, id="low",  is_filtered=True, final_score=0.3)
-        insert_article(db, id="high", is_filtered=True, final_score=0.9)
+        now = datetime.now(timezone.utc)
+        insert_article(db, id="low",  is_filtered=True, importance_score=0.3, published_at=now)
+        insert_article(db, id="high", is_filtered=True, importance_score=0.9, published_at=now)
 
         retrieve_ids = [a["id"] for a in client.get("/retrieve").json()]
         articles_ids = [a["id"] for a in client.get("/articles").json()]

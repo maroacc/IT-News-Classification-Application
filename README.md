@@ -210,10 +210,10 @@ The Streamlit dashboard polls `/health` every 2 seconds on startup and shows a *
 
 ### Ranking — Importance × Recency
 Each article is ranked by `final_score = importance_score × recency_score`, where:
-- `importance_score` comes from the weighted zero-shot classifier output
-- `recency_score = e^(-λ * hours_since_published)` — exponential decay with a ~24h half-life
+- `importance_score` comes from the weighted zero-shot classifier output — computed **at fetch time** and stored in the database
+- `recency_score = e^(-λ * hours_since_published)` — computed **at retrieve time**, so it always reflects the article's true age at the moment of the request
 
-Both scores are computed and stored **at ingestion time**, making the `/retrieve` endpoint fully deterministic regardless of when it is called.
+`importance_score` is the only score persisted. `recency_score` and `final_score` are computed fresh on every call to `/retrieve` and `/articles` and injected into the response. This means the ranking automatically degrades older articles over time without any reprocessing — an article fetched yesterday will rank lower today than it did yesterday.
 
 ### News Sources — RSS feeds
 All sources (Reddit, Ars Technica, The Hacker News, Tom's Hardware) are fetched via RSS feeds — no API credentials required, and RSS is universally supported. The fetcher uses a **base class pattern** so new sources can be added by implementing a single `fetch()` method, with no changes to existing code.
@@ -285,9 +285,7 @@ Defines the `Article` SQLAlchemy model (single table). Fields:
 | `body` | Text (optional) | Article content |
 | `published_at` | DateTime | UTC timestamp from the source |
 | `url` | String (optional) | Link to the original article, populated from the RSS `link` field. Stored separately from `id` because some sources (e.g. Tom's Hardware) use non-URL GUIDs as their RSS entry ID. |
-| `importance_score` | Float | Weighted score from zero-shot classifier (0–1) |
-| `recency_score` | Float | Exponential decay based on `published_at` (0–1) |
-| `final_score` | Float | `importance * recency`, used for ranking in `/retrieve` |
+| `importance_score` | Float | Weighted score from zero-shot classifier (0–1) — stored at fetch time |
 | `is_filtered` | Boolean | `True` if article passed the classifier threshold |
 | `category` | String | Winning label from the classifier |
 | `ingested_at` | DateTime | When the article was received by the system |
@@ -320,7 +318,7 @@ Fetches articles from all registered RSS sources, classifies them, and persists 
 
 **Design decisions:**
 - Errors in one source are logged and skipped — other sources are unaffected.
-- Existing articles are overwritten on re-fetch (upsert by ID), so content updates are reflected.
+- **Skip-if-unchanged** — before running ML inference, `classify_and_save()` checks whether an article with the same ID already exists in the DB with identical `title` and `body`. If so, the existing record is returned immediately and classification is skipped entirely. If the content has changed, the article is re-classified and updated. This avoids redundant ML inference on every fetch cycle for articles that haven't changed.
 - `_fetch_all` runs inside `loop.run_in_executor(None, ...)` so the blocking RSS + ML work happens in a thread pool and never stalls FastAPI's event loop. Incoming requests are handled normally while a fetch cycle is in progress.
 - A 5-second delay is inserted before the first fetch cycle at startup, giving the server time to finish initialising and become reachable before the first (potentially slow) classification run begins.
 
@@ -344,7 +342,7 @@ Since confidences sum to 1.0, the score is naturally bounded:
 
 Articles with `importance_score > 0.5` are marked `is_filtered = True` and appear in `/retrieve`.
 
-**Recency score:**
+**Recency score** *(computed at retrieve time, not stored):*
 Exponential decay with a 48-hour half-life:
 ```
 recency_score = e^(-λ × hours_since_published)    where λ = ln(2) / 48 ≈ 0.0144
@@ -353,15 +351,16 @@ recency_score = e^(-λ × hours_since_published)    where λ = ln(2) / 48 ≈ 0.
 - After 48h: `recency_score = 0.5`
 - After 96h: `recency_score = 0.25`
 
-**Final score:**
+**Final score** *(computed at retrieve time, not stored):*
 ```
 final_score = importance_score × recency_score
 ```
-Used by `/retrieve` to sort articles by importance and freshness combined.
+Computed fresh on every `/retrieve` and `/articles` request. Sorting happens in Python after score computation, since the value is not persisted in the database.
 
 **Design decisions:**
 - **Title + body snippet** is fed to the classifier. The article title alone is often insufficient to distinguish real news from community forum posts — a Reddit post titled *"HELP PLEASE! Had my first real email compromise incident this week"* is indistinguishable from a news headline without the body context. The first 300 characters of the body are appended to the title before classification, giving the model enough context to detect the conversational tone of forum posts. 300 characters was chosen as a balance between signal and inference speed.
 - **Lazy model loading** — the model is loaded on the first classification call, keeping app startup fast.
+- **Skip-if-unchanged** — `classify_and_save()` checks for an existing DB record with the same ID before classifying. If `title` and `body` are identical, classification is skipped and the existing record is returned. If the content has changed, the article is re-classified and the record updated. `title + body` was chosen as the change signal since they are the only fields that affect the classification result. The zero-shot model is deterministic at inference time (transformer models run in eval mode with dropout disabled, so identical inputs always produce identical outputs), so strictly speaking re-classifying unchanged content would yield the same scores. The skip-if-unchanged check is a precautionary measure that also avoids unnecessary CPU overhead on each fetch cycle.
 - **Failure handling** — if classification fails, the article is still saved with null scores and `is_filtered = False`. No data is lost.
 - **Shared singleton** — a single `classifier` instance is imported by both the fetcher and the `/ingest` route, so the model is only loaded once.
 - **Category** is the label with the highest weighted score, used for display in the UI.
@@ -391,11 +390,14 @@ The project separates **unit tests** (fast, no network, no model) from **integra
 
 **`tests/test_classifier.py`** — mocks the ML pipeline. Covers:
 - `_compute_recency`, `_compute_importance`, `classify_and_save`
+- `classify_and_save` tests no longer assert on `recency_score` or `final_score` — those are not stored, only `importance_score`, `category`, and `is_filtered` are verified
 
 **`tests/test_routes.py`** — mocks the classifier, uses an in-memory SQLite database. Covers:
 - `POST /ingest` — acknowledgment, batch count, validation errors, classifier called per article
 - `GET /retrieve` — filtering, ordering, contract response shape (no classification fields leaked)
 - `GET /articles` — full schema with classification fields, consistent ordering with `/retrieve`
+- Sort order tests use `importance_score` and `published_at=now` (recency ≈ 1.0) to control ranking, since `final_score` is no longer stored and ordering happens in Python at request time
+- Classification field tests assert that `recency_score` and `final_score` are present and within `(0, 1]` rather than exact values, since they are computed dynamically at request time
 
 #### Note on in-memory SQLite and StaticPool
 

@@ -159,12 +159,9 @@ class TestClassifyAndSave:
         db = MagicMock()
 
         with patch.object(self.service, "_compute_importance", return_value=(0.8, "system outage or service disruption")):
-            with patch.object(self.service, "_compute_recency", return_value=0.9):
-                result = self.service.classify_and_save(article, db)
+            result = self.service.classify_and_save(article, db)
 
         assert result.importance_score == 0.8
-        assert result.recency_score == 0.9
-        assert abs(result.final_score - 0.72) < 1e-6
         assert result.category == "system outage or service disruption"
         assert result.is_filtered is True  # 0.8 > 0.5
 
@@ -173,8 +170,7 @@ class TestClassifyAndSave:
         db = MagicMock()
 
         with patch.object(self.service, "_compute_importance", return_value=(0.3, "general technology news")):
-            with patch.object(self.service, "_compute_recency", return_value=0.9):
-                result = self.service.classify_and_save(article, db)
+            result = self.service.classify_and_save(article, db)
 
         assert result.is_filtered is False
 
@@ -183,8 +179,7 @@ class TestClassifyAndSave:
         db = MagicMock()
 
         with patch.object(self.service, "_compute_importance", return_value=(0.8, "system outage or service disruption")):
-            with patch.object(self.service, "_compute_recency", return_value=0.9):
-                self.service.classify_and_save(article, db)
+            self.service.classify_and_save(article, db)
 
         db.merge.assert_called_once()
         db.commit.assert_called_once()
@@ -198,8 +193,6 @@ class TestClassifyAndSave:
             result = self.service.classify_and_save(article, db)
 
         assert result.importance_score is None
-        assert result.recency_score is None
-        assert result.final_score is None
         assert result.is_filtered is False
         db.merge.assert_called_once()  # still saved despite failure
         db.commit.assert_called_once()
@@ -210,8 +203,7 @@ class TestClassifyAndSave:
         db = MagicMock()
 
         with patch.object(self.service, "_compute_importance", return_value=(0.9, "system outage or service disruption")):
-            with patch.object(self.service, "_compute_recency", return_value=1.0):
-                result = self.service.classify_and_save(article, db)
+            result = self.service.classify_and_save(article, db)
 
         assert result.id == "abc-123"
         assert result.source == "ars-technica"
