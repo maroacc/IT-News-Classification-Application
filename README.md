@@ -389,8 +389,10 @@ The project separates **unit tests** (fast, no network, no model) from **integra
 - `strip_html`, `parse_date`, `RSSSource.fetch()`, `SOURCES` registry
 
 **`tests/test_classifier.py`** — mocks the ML pipeline. Covers:
-- `_compute_recency`, `_compute_importance`, `classify_and_save`
+- `_compute_recency`, `_compute_importance`, `classify_and_save`, skip-if-unchanged
 - `classify_and_save` tests no longer assert on `recency_score` or `final_score` — those are not stored, only `importance_score`, `category`, and `is_filtered` are verified
+- Score arrays in `_compute_importance` tests have 6 elements — one per label including "IT community discussion or advice request". Previously they had 5, causing `zip` to silently drop the new label from the weighted sum
+- `TestSkipIfUnchanged` covers all four branches: unchanged article (skips inference), title changed (re-classifies), body changed (re-classifies), no existing record (classifies normally)
 
 **`tests/test_routes.py`** — mocks the classifier, uses an in-memory SQLite database. Covers:
 - `POST /ingest` — acknowledgment, batch count, validation errors, classifier called per article

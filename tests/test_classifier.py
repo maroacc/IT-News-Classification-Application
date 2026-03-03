@@ -10,6 +10,7 @@ from app.classifier import (
     RECENCY_LAMBDA,
     ClassifierService,
 )
+from app.models import Article
 from app.schemas import ArticleIngest
 
 
@@ -98,7 +99,7 @@ class TestComputeImportance:
 
     def test_high_security_confidence_gives_high_score(self):
         # 90% confidence on cybersecurity (weight=1.0) → should pass filter
-        scores = [0.9, 0.05, 0.02, 0.02, 0.01]
+        scores = [0.9, 0.04, 0.02, 0.02, 0.01, 0.01]
         with patch.object(self.service, "_get_pipeline", return_value=mock_pipeline(LABELS, scores)):
             score, category = self.service._compute_importance("test")
 
@@ -106,8 +107,8 @@ class TestComputeImportance:
         assert category == "cybersecurity incident or data breach"
 
     def test_high_general_news_confidence_gives_low_score(self):
-        # 96% confidence on general tech news (weight=0.2) → should fail filter
-        scores = [0.01, 0.01, 0.01, 0.01, 0.96]
+        # 94% confidence on general tech news (weight=0.2) → should fail filter
+        scores = [0.01, 0.01, 0.01, 0.01, 0.94, 0.02]
         with patch.object(self.service, "_get_pipeline", return_value=mock_pipeline(LABELS, scores)):
             score, category = self.service._compute_importance("test")
 
@@ -116,13 +117,14 @@ class TestComputeImportance:
 
     def test_weighted_score_calculation_is_correct(self):
         # Verify the weighted sum formula manually
-        scores = [0.5, 0.2, 0.1, 0.1, 0.1]
+        scores = [0.5, 0.2, 0.1, 0.1, 0.05, 0.05]
         expected = (
-            0.5 * 1.0 +  # cybersecurity incident
-            0.2 * 1.0 +  # system outage
-            0.1 * 0.9 +  # critical software bug
-            0.1 * 0.5 +  # software release
-            0.1 * 0.2    # general technology news
+            0.5  * 1.0  +  # cybersecurity incident
+            0.2  * 1.0  +  # system outage
+            0.1  * 0.9  +  # critical software bug
+            0.1  * 0.5  +  # software release
+            0.05 * 0.2  +  # general technology news
+            0.05 * 0.15    # IT community discussion or advice request
         )
         with patch.object(self.service, "_get_pipeline", return_value=mock_pipeline(LABELS, scores)):
             score, _ = self.service._compute_importance("test")
@@ -131,15 +133,15 @@ class TestComputeImportance:
 
     def test_category_is_label_with_highest_weighted_score(self):
         # Outage label (index 1) gets highest confidence → should win
-        scores = [0.1, 0.7, 0.1, 0.05, 0.05]
+        scores = [0.1, 0.7, 0.1, 0.05, 0.03, 0.02]
         with patch.object(self.service, "_get_pipeline", return_value=mock_pipeline(LABELS, scores)):
             _, category = self.service._compute_importance("test")
 
         assert category == "system outage or service disruption"
 
     def test_score_is_within_expected_range(self):
-        # Score must always be between min_weight (0.2) and max_weight (1.0)
-        scores = [0.2, 0.2, 0.2, 0.2, 0.2]
+        # Score must always be between min_weight (0.15) and max_weight (1.0)
+        scores = [0.2, 0.2, 0.2, 0.2, 0.1, 0.1]
         with patch.object(self.service, "_get_pipeline", return_value=mock_pipeline(LABELS, scores)):
             score, _ = self.service._compute_importance("test")
 
@@ -209,3 +211,72 @@ class TestClassifyAndSave:
         assert result.source == "ars-technica"
         assert result.title == "Big Outage"
         assert result.published_at == published
+
+
+# ---------------------------------------------------------------------------
+# classify_and_save — skip-if-unchanged
+# ---------------------------------------------------------------------------
+
+class TestSkipIfUnchanged:
+    def setup_method(self):
+        self.service = ClassifierService()
+
+    def _existing(self, article: ArticleIngest) -> Article:
+        """Build an Article ORM object that looks like a previously classified record."""
+        return Article(
+            id=article.id,
+            source=article.source,
+            title=article.title,
+            body=article.body,
+            published_at=article.published_at,
+            importance_score=0.7,
+            is_filtered=True,
+            category="system outage or service disruption",
+        )
+
+    def test_skips_classification_when_title_and_body_unchanged(self):
+        article = make_article()
+        db = MagicMock()
+        db.get.return_value = self._existing(article)
+
+        with patch.object(self.service, "_compute_importance") as mock_imp:
+            result = self.service.classify_and_save(article, db)
+
+        mock_imp.assert_not_called()
+        db.merge.assert_not_called()
+        db.commit.assert_not_called()
+        assert result.importance_score == 0.7  # unchanged record returned as-is
+
+    def test_reclassifies_when_title_changes(self):
+        article = make_article(title="New Title")
+        db = MagicMock()
+        existing = self._existing(make_article(title="Old Title"))
+        db.get.return_value = existing
+
+        with patch.object(self.service, "_compute_importance", return_value=(0.8, "system outage or service disruption")) as mock_imp:
+            self.service.classify_and_save(article, db)
+
+        mock_imp.assert_called_once()
+        db.merge.assert_called_once()
+
+    def test_reclassifies_when_body_changes(self):
+        article = make_article(body="new body content")
+        db = MagicMock()
+        existing = self._existing(make_article(body="old body content"))
+        db.get.return_value = existing
+
+        with patch.object(self.service, "_compute_importance", return_value=(0.8, "system outage or service disruption")) as mock_imp:
+            self.service.classify_and_save(article, db)
+
+        mock_imp.assert_called_once()
+        db.merge.assert_called_once()
+
+    def test_classifies_new_article_when_no_existing_record(self):
+        article = make_article()
+        db = MagicMock()
+        db.get.return_value = None  # no existing record
+
+        with patch.object(self.service, "_compute_importance", return_value=(0.8, "system outage or service disruption")) as mock_imp:
+            self.service.classify_and_save(article, db)
+
+        mock_imp.assert_called_once()
