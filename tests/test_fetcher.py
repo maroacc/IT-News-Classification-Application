@@ -5,8 +5,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app.fetcher import (
-    SOURCES,
-    RedditSysadminSource,
+    _DEFAULT_SOURCES,
+    RSSSource,
     parse_date,
     strip_html,
 )
@@ -94,9 +94,17 @@ class TestParseDate:
 # RSSSource.fetch()
 # ---------------------------------------------------------------------------
 
+def make_rss_source(name="reddit-sysadmin", url="https://www.reddit.com/r/sysadmin.rss") -> RSSSource:
+    """Helper to build an RSSSource instance with the given name and URL."""
+    s = RSSSource()
+    s.source_name = name
+    s.feed_url = url
+    return s
+
+
 class TestRSSSourceFetch:
     def test_returns_articles_with_correct_fields(self):
-        source = RedditSysadminSource()
+        source = make_rss_source()
         entry = MockEntry(id="https://example.com/1", title="AWS outage", summary="Details here")
         with patch("feedparser.parse", return_value=make_mock_feed(entry)):
             articles = source.fetch()
@@ -108,7 +116,7 @@ class TestRSSSourceFetch:
         assert articles[0].body == "Details here"
 
     def test_html_is_stripped_from_body(self):
-        source = RedditSysadminSource()
+        source = make_rss_source()
         entry = MockEntry(id="x", title="x", summary="<p>Clean <b>text</b></p>")
         with patch("feedparser.parse", return_value=make_mock_feed(entry)):
             articles = source.fetch()
@@ -116,7 +124,7 @@ class TestRSSSourceFetch:
         assert articles[0].body == "Clean text"
 
     def test_body_is_none_when_empty(self):
-        source = RedditSysadminSource()
+        source = make_rss_source()
         entry = MockEntry(id="x", title="x", summary="")
         with patch("feedparser.parse", return_value=make_mock_feed(entry)):
             articles = source.fetch()
@@ -124,7 +132,7 @@ class TestRSSSourceFetch:
         assert articles[0].body is None
 
     def test_skips_entry_with_no_id_or_link(self):
-        source = RedditSysadminSource()
+        source = make_rss_source()
         entry = MockEntry(id=None, title="No ID article", link=None)
         with patch("feedparser.parse", return_value=make_mock_feed(entry)):
             articles = source.fetch()
@@ -132,14 +140,14 @@ class TestRSSSourceFetch:
         assert articles == []
 
     def test_returns_empty_list_on_fetch_error(self):
-        source = RedditSysadminSource()
+        source = make_rss_source()
         with patch("feedparser.parse", side_effect=Exception("Network error")):
             articles = source.fetch()
 
         assert articles == []
 
     def test_multiple_entries_all_returned(self):
-        source = RedditSysadminSource()
+        source = make_rss_source()
         entries = [MockEntry(id=f"https://example.com/{i}", title=f"Article {i}") for i in range(5)]
         with patch("feedparser.parse", return_value=make_mock_feed(*entries)):
             articles = source.fetch()
@@ -148,21 +156,21 @@ class TestRSSSourceFetch:
 
 
 # ---------------------------------------------------------------------------
-# SOURCES registry
+# _DEFAULT_SOURCES registry
 # ---------------------------------------------------------------------------
 
-class TestSourcesRegistry:
-    def test_all_sources_have_name_and_url(self):
-        for source in SOURCES:
-            assert source.source_name, f"{type(source).__name__} missing source_name"
-            assert source.feed_url, f"{type(source).__name__} missing feed_url"
+class TestDefaultSources:
+    def test_all_default_sources_have_name_and_url(self):
+        for name, url in _DEFAULT_SOURCES:
+            assert name, "Missing source name"
+            assert url, "Missing feed URL"
 
     def test_source_names_are_unique(self):
-        names = [s.source_name for s in SOURCES]
+        names = [name for name, _ in _DEFAULT_SOURCES]
         assert len(names) == len(set(names)), "Duplicate source names detected"
 
-    def test_expected_sources_are_registered(self):
-        names = {s.source_name for s in SOURCES}
+    def test_expected_sources_are_present(self):
+        names = {name for name, _ in _DEFAULT_SOURCES}
         assert "reddit-sysadmin" in names
         assert "ars-technica" in names
         assert "the-hacker-news" in names

@@ -1,5 +1,5 @@
 """
-Integration tests for the API routes — real classifier, in-memory SQLite database.
+Integration tests for the API routes — real classifier, PostgreSQL test database.
 Tests the full ingest → classify → retrieve pipeline end-to-end.
 
 The first run will load the model (~300MB). Subsequent runs use the cache.
@@ -9,9 +9,7 @@ Run with: pytest tests/test_routes_integration.py -v
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
 
 from app.database import Base, get_db
 from app.routes.articles import router
@@ -63,19 +61,12 @@ IRRELEVANT_BATCH = [
 # ---------------------------------------------------------------------------
 
 @pytest.fixture(scope="module")
-def populated_client():
+def populated_client(pg_engine):
     """
-    Creates a fresh in-memory DB, ingests all test batches via the API,
-    and yields a ready-to-query TestClient.
+    Ingests all test batches via the API once per module and yields a ready-to-query TestClient.
     Model is loaded once for the entire module.
     """
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    Base.metadata.create_all(bind=engine)
-    Session = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    Session = sessionmaker(autocommit=False, autoflush=False, bind=pg_engine)
     db = Session()
 
     _app.dependency_overrides[get_db] = lambda: db
@@ -88,7 +79,10 @@ def populated_client():
 
     db.close()
     _app.dependency_overrides.clear()
-    engine.dispose()
+    with pg_engine.connect() as conn:
+        for table in reversed(Base.metadata.sorted_tables):
+            conn.execute(table.delete())
+        conn.commit()
 
 
 # ---------------------------------------------------------------------------

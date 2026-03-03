@@ -1,15 +1,14 @@
+import os
+
 from sqlalchemy import create_engine
-from sqlalchemy.orm import declarative_base
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import declarative_base, sessionmaker
 
-# SQLite file will be created at the project root
-SQLALCHEMY_DATABASE_URL = "sqlite:///./news.db"
-
-# connect_args is required for SQLite to allow multi-threaded access (FastAPI runs async)
-engine = create_engine(
-    SQLALCHEMY_DATABASE_URL,
-    connect_args={"check_same_thread": False}
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    "postgresql://postgres:postgres@localhost:5432/news",
 )
+
+engine = create_engine(DATABASE_URL)
 
 # Each request gets its own DB session
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

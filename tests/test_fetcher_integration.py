@@ -8,15 +8,18 @@ from datetime import datetime, timezone
 
 import pytest
 
-from app.fetcher import (
-    ArsTechnicaSource,
-    HackerNewsSource,
-    RedditSysadminSource,
-    SOURCES,
-    TomsHardwareSource,
-)
+from app.fetcher import _DEFAULT_SOURCES, RSSSource
 
 pytestmark = pytest.mark.integration  # marks every test in this file as integration
+
+
+def _make_source(name: str) -> RSSSource:
+    """Build an RSSSource from _DEFAULT_SOURCES by name."""
+    url = next(u for n, u in _DEFAULT_SOURCES if n == name)
+    s = RSSSource()
+    s.source_name = name
+    s.feed_url = url
+    return s
 
 
 def assert_valid_articles(articles, source_name: str):
@@ -45,32 +48,28 @@ def assert_valid_articles(articles, source_name: str):
 
 class TestRedditSysadminLive:
     def test_fetches_real_articles(self):
-        articles = RedditSysadminSource().fetch()
-        assert_valid_articles(articles, "reddit-sysadmin")
+        assert_valid_articles(_make_source("reddit-sysadmin").fetch(), "reddit-sysadmin")
 
 
 class TestArsTechnicaLive:
     def test_fetches_real_articles(self):
-        articles = ArsTechnicaSource().fetch()
-        assert_valid_articles(articles, "ars-technica")
+        assert_valid_articles(_make_source("ars-technica").fetch(), "ars-technica")
 
 
 class TestHackerNewsLive:
     def test_fetches_real_articles(self):
-        articles = HackerNewsSource().fetch()
-        assert_valid_articles(articles, "the-hacker-news")
+        assert_valid_articles(_make_source("the-hacker-news").fetch(), "the-hacker-news")
 
 
 class TestTomsHardwareLive:
     def test_fetches_real_articles(self):
-        articles = TomsHardwareSource().fetch()
-        assert_valid_articles(articles, "toms-hardware")
+        assert_valid_articles(_make_source("toms-hardware").fetch(), "toms-hardware")
 
 
-class TestAllSourcesLive:
-    def test_all_registered_sources_return_articles(self):
-        """Smoke test — verifies every source in the registry is reachable."""
-        for source in SOURCES:
-            articles = source.fetch()
+class TestAllDefaultSourcesLive:
+    def test_all_default_sources_return_articles(self):
+        """Smoke test — verifies every default source is reachable."""
+        for name, _ in _DEFAULT_SOURCES:
+            articles = _make_source(name).fetch()
             assert len(articles) > 0, \
-                f"Source '{source.source_name}' returned no articles — feed may be down or URL changed"
+                f"Source '{name}' returned no articles — feed may be down or URL changed"

@@ -54,7 +54,7 @@ def ingest(articles: List[ArticleIngest], db: Session = Depends(get_db)):
     """
     logger.info(f"[/ingest] Received batch of {len(articles)} articles")
     for article in articles:
-        classifier.classifyr_and_save(article, db)
+        classifier.classify_and_save(article, db)
     logger.info(f"[/ingest] Batch processed successfully")
     return {"status": "ok", "received": len(articles)}
 

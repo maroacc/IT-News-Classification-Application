@@ -1,3 +1,4 @@
+import os
 import time
 from datetime import datetime, timezone
 
@@ -8,10 +9,11 @@ import streamlit as st
 # Constants
 # ─────────────────────────────────────────────────────────────────────────────
 
-API_URL = "http://localhost:8000/articles"
-FETCH_URL = "http://localhost:8000/fetch"
-HEALTH_URL = "http://localhost:8000/health"
-SOURCES_URL = "http://localhost:8000/sources"
+_API_BASE = os.getenv("API_BASE_URL", "http://localhost:8000")
+API_URL    = f"{_API_BASE}/articles"
+FETCH_URL  = f"{_API_BASE}/fetch"
+HEALTH_URL = f"{_API_BASE}/health"
+SOURCES_URL = f"{_API_BASE}/sources"
 REFRESH_INTERVAL = 300  # seconds — matches fetcher interval
 
 CATEGORIES = [

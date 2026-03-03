@@ -7,13 +7,14 @@ Application to retrieve news from several IT sources, classify them according to
 IT-News-Classification-Application/
 ├── app/
 │   ├── classifier.py     # Zero-shot classifier, scoring, DB persistence
-│   ├── database.py       # SQLite engine, session factory, get_db() dependency
+│   ├── database.py       # PostgreSQL engine, DATABASE_URL config, get_db() dependency
 │   ├── fetcher.py        # RSS fetcher, background loop, DB-backed source registry
 │   ├── models.py         # SQLAlchemy ORM models (Article, RSSSourceModel tables)
 │   ├── schemas.py        # Pydantic schemas for API input/output validation
 │   └── routes/
 │       └── articles.py   # /ingest, /retrieve, /articles, /sources route handlers
 ├── tests/
+│   ├── conftest.py                   # Shared pg_engine fixture (session-scoped)
 │   ├── test_classifier.py            # Classifier unit tests
 │   ├── test_classifier_integration.py
 │   ├── test_fetcher.py               # Fetcher unit tests
@@ -22,20 +23,49 @@ IT-News-Classification-Application/
 │   └── test_routes_integration.py
 ├── main.py               # FastAPI app, lifespan (DB init + background fetcher)
 ├── streamlit_app.py      # Streamlit dashboard (calls GET /articles)
+├── Dockerfile            # Single image used by both api and ui services
+├── docker-compose.yml    # Three services: postgres, api, ui
+├── .env                  # Local credentials (gitignored)
+├── .env.example          # Credential template (committed)
 ├── requirements.txt      # Pinned dependencies
-├── pytest.ini            # Pytest config (integration marker)
-└── news.db               # SQLite database (created on first run)
+└── pytest.ini            # Pytest config (integration marker)
 ```
 
----
 
 ## Getting Started
 
 ### Prerequisites
-- Python 3.12
-- pip
+- Docker + Docker Compose (recommended)
+- *or* Python 3.12, pip, and a running PostgreSQL instance
 
-### Setup
+
+### Option A: Docker (recommended)
+
+```bash
+# Build and start all three services (postgres, api, ui)
+docker compose up --build
+```
+
+On first start Docker will:
+1. Pull the `postgres:16` image and create the database
+2. Build the application image and install all dependencies
+3. Start the API, it creates tables, seeds the 4 default sources, and begins fetching
+4. Start the Streamlit UI once the API is up
+
+| Service | URL |
+|---------|-----|
+| API | `http://localhost:8000` |
+| Swagger UI | `http://localhost:8000/docs` |
+| Streamlit dashboard | `http://localhost:8501` |
+
+The HuggingFace model (~300MB) is downloaded on first start and cached in a Docker volume (`hf_cache`), so subsequent starts are near-instant.
+
+To stop: `docker compose down`. To also delete all data: `docker compose down -v`.
+
+
+### Option B: Local (without Docker)
+
+**Prerequisites:** Python 3.12 and a running PostgreSQL server.
 
 ```bash
 # Create and activate a virtual environment
@@ -45,20 +75,19 @@ source .venv/bin/activate     # macOS/Linux
 
 # Install dependencies
 pip install -r requirements.txt
+
+# Create the database in PostgreSQL (one-time)
+createdb news
 ```
 
-### Running the app
-
-The application has two components that run in separate terminals.
-
-**Terminal 1 — API server**
+**Terminal 1, API server**
 
 ```bash
-uvicorn main:app --reload
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/news uvicorn main:app --reload
 ```
 
 On startup the app will:
-1. Create `news.db` at the project root (if it doesn't exist)
+1. Create all tables in the PostgreSQL database (if they don't exist)
 2. Seed the 4 default RSS sources into the `sources` table (skipped if already present)
 3. Start a background fetcher that polls all sources every 5 minutes
 4. Classify and store each article automatically
@@ -66,7 +95,7 @@ On startup the app will:
 The API will be available at `http://localhost:8000`.
 Interactive API docs (Swagger UI) at `http://localhost:8000/docs`.
 
-**Terminal 2 — Streamlit dashboard**
+**Terminal 2, Streamlit dashboard**
 
 ```bash
 streamlit run streamlit_app.py
@@ -74,26 +103,23 @@ streamlit run streamlit_app.py
 
 The dashboard will open automatically in your browser at `http://localhost:8501`.
 
-It calls `GET /articles` to display classified articles in a card layout. The API server must be running first.
-
 **Sidebar controls:**
-- **Refresh now** — triggers an immediate fetch and classification cycle
-- **Auto-refresh** — toggle to automatically reload the feed every 5 minutes
-- **Category filter** — multiselect to show/hide specific categories
-- **Source filter** — multiselect derived from sources present in the current article set; updates automatically when new sources produce articles
-- **Sort by** — choose between *Final score* (importance × recency, default), *Importance* (classifier score only), or *Most recent* (publication date)
-- **Add a news source** — expandable form in the sidebar; enter a name and RSS feed URL to register a new source. The source is validated (feed must return at least one article) and persisted to the database. It will appear in the feed after the next fetch cycle.
+- **Refresh now:** triggers an immediate fetch and classification cycle
+- **Auto-refresh:** toggle to automatically reload the feed every 5 minutes
+- **Category filter:** multiselect to show/hide specific categories
+- **Source filter:** multiselect derived from sources present in the current article set; updates automatically when new sources produce articles
+- **Sort by:** choose between *Final score* (importance × recency, default), *Importance* (classifier score only), or *Most recent* (publication date)
+- **Add a news source:** expandable form in the sidebar; enter a name and RSS feed URL to register a new source. The source is validated (feed must return at least one article) and persisted to the database. It will appear in the feed after the next fetch cycle.
 
 **Article cards** show the category emoji, source, time since publication, title (as a clickable link to the original article when a URL is available), a 200-character body snippet, and three scores (importance, recency, final) displayed compactly on the right side of the card.
 
----
 
 ## API Reference
 
 ### `POST /ingest`
 Ingest a batch of raw articles for classification and storage.
 
-**Request body** — JSON array of article objects:
+**Request body:** JSON array of article objects:
 ```json
 [
   {
@@ -106,17 +132,16 @@ Ingest a batch of raw articles for classification and storage.
 ]
 ```
 
-**Response** — HTTP 200:
+**Response:** HTTP 200:
 ```json
 { "status": "ok", "received": 1 }
 ```
 
----
 
 ### `GET /retrieve`
 Returns all articles that passed the relevance filter, sorted by score descending. Response matches the API contract shape exactly.
 
-**Response** — JSON array:
+**Response:** JSON array:
 ```json
 [
   {
@@ -129,31 +154,11 @@ Returns all articles that passed the relevance filter, sorted by score descendin
 ]
 ```
 
----
 
 ### `GET /articles`
 Same filtering and ordering as `/retrieve` but returns the full internal schema including classification fields. Intended for the UI.
 
----
-
-### `POST /sources`
-Register a new RSS feed source. The feed URL is validated by fetching it — the request is rejected if no articles are returned. Duplicate feed URLs are rejected with HTTP 409.
-
-**Request body:**
-```json
-{ "name": "BleepingComputer", "feed_url": "https://www.bleepingcomputer.com/feed/" }
-```
-
-**Response** — HTTP 201:
-```json
-{ "status": "ok", "name": "BleepingComputer" }
-```
-
-**Error responses:**
-- `409 Conflict` — feed URL is already registered
-- `422 Unprocessable Entity` — URL did not return any articles
-
-**Response** — JSON array with additional fields:
+**Response:** JSON array with additional fields:
 ```json
 [
   {
@@ -171,149 +176,57 @@ Register a new RSS feed source. The feed URL is validated by fetching it — the
 ]
 ```
 
----
+
+### `POST /sources`
+Register a new RSS feed source. The feed URL is validated by fetching it, the request is rejected if no articles are returned. Duplicate feed URLs are rejected with HTTP 409.
+
+**Request body:**
+```json
+{ "name": "BleepingComputer", "feed_url": "https://www.bleepingcomputer.com/feed/" }
+```
+
+**Response:** HTTP 201:
+```json
+{ "status": "ok", "name": "BleepingComputer" }
+```
+
+**Error responses:**
+- `409 Conflict`, feed URL is already registered
+- `422 Unprocessable Entity`, URL did not return any articles
+
 
 ## Technical Decisions
 
-### Framework — FastAPI + Streamlit
-FastAPI handles the REST API (`/ingest`, `/retrieve`) due to its native async support, automatic request validation via Pydantic, and auto-generated docs. Streamlit is used for the UI — it allows building a functional web dashboard in pure Python with minimal overhead.
+See [TECHNICAL_DECISIONS.md](TECHNICAL_DECISIONS.md) for detailed rationale on framework, database, classification, ranking, and other design choices.
 
-**Streamlit is suitable for this PoC but not for production with multiple users.** Key limitations:
-
-- **Full page re-render on every interaction** — Streamlit has no concept of partial updates. Any filter change, button click, or auto-refresh reruns the entire Python script from top to bottom and redraws the whole page. For a single user this is acceptable; for many concurrent users it becomes slow and resource-heavy.
-- **No true multi-user session isolation** — Streamlit's session state is per-browser-tab, but the server runs a single Python process. Under concurrent load, blocking operations (like the auto-refresh sleep) affect all sessions.
-- **Limited UI customisation** — layout, styling, and interactivity are constrained by what Streamlit exposes. Building a production-grade newsfeed UI with real-time updates, pagination, or user preferences would require a proper frontend framework (React, Vue, etc.).
-- **Not designed for horizontal scaling** — Streamlit apps are stateful and tied to a single process, making them hard to scale behind a load balancer.
-
-For the intended use case — **a single IT manager checking the feed** — these limitations are irrelevant. Streamlit delivers a functional, readable dashboard with minimal code, which is exactly what a PoC requires.
-
-### Database — SQLite + SQLAlchemy ORM
-SQLite keeps the project self-contained with no external dependencies (no database server to run). SQLAlchemy ORM is used to interact with the DB in Python without writing raw SQL, and makes it straightforward to swap to PostgreSQL later if needed.
-
-**Single table design (PoC decision):** A single `articles` table stores all news items, already classified. Articles are classified and scored before being written to the database — meaning only enriched, processed records ever land in storage. This keeps the schema simple and queries fast for a proof of concept.
-
-In a production scenario, a better approach would be a **two-table design**:
-- A **landing table** receives raw articles immediately on ingestion, with no processing delay. This ensures data is never lost even if classification fails, and allows the ingest endpoint to respond fast.
-- A **processed table** receives articles after classification, enriched with scores and category.
-- The landing table can be cleaned up after a configurable retention period (e.g. delete records older than 7 days) to prevent unbounded growth.
-
-This separation also makes it easier to reprocess articles if the classifier changes, since the raw data is always available.
-
-### Classification — Zero-shot (`valhalla/distilbart-mnli-12-3`)
-No labelled dataset was provided for this task, making supervised training impractical. Even if one were available, collecting a dataset large and diverse enough to outperform modern pre-trained models would require significant time and resources. Zero-shot models have advanced to the point where they generalise remarkably well across domains out of the box — making them the pragmatic and effective choice here.
-
-Zero-shot classification allows us to define meaningful IT-manager-relevant categories (e.g. "system outage", "cybersecurity incident") without needing any labelled training data. The `valhalla/distilbart-mnli-12-3` model is a distilled version of BART-large-MNLI — a good balance between accuracy and speed for local/CPU use.
-
-The classifier assigns a weighted importance score (0–1) based on predefined labels and their relevance to IT managers:
-
-| Label                                       | Weight |
-|---------------------------------------------|--------|
-| `cybersecurity incident or data breach`     | 1.0    |
-| `system outage or service disruption`       | 1.0    |
-| `critical software bug or vulnerability`    | 0.9    |
-| `software release or patch`                 | 0.5    |
-| `general technology news`                   | 0.2    |
-| `IT community discussion or advice request` | 0.15   |
-
-The sixth label (`IT community discussion or advice request`) was added after analysis revealed that Reddit r/sysadmin posts — which are forum discussions, not news articles — were being forced into high-weight categories like "system outage" and passing the filter incorrectly. A dedicated low-weight label (0.15, below the 0.5 threshold) gives the model a correct bucket for community content, causing it to be filtered out automatically.
-
-### Model loading — eager, background thread
-
-The ML model (~300MB) is loaded **eagerly at startup** rather than lazily on the first classification request. This avoids an unexpected multi-second stall on the first `/ingest` or `/fetch` call after the server starts.
-
-Loading happens in a **daemon background thread** (`threading.Thread(target=classifier.load, daemon=True).start()`) so the server becomes reachable within seconds. The model finishes loading in parallel — typically ~60s on first run (download + load), near-instant on subsequent runs (cached locally by HuggingFace).
-
-A public `load()` method was added to `ClassifierService` (calling the existing internal `_get_pipeline()`) along with an `is_ready` property, so the startup logic can interact with a clean public API without reaching into private internals.
-
-**`GET /health`** exposes readiness to callers. Returns `{"status": "loading"}` while the model is initialising, and `{"status": "ready"}` once all endpoints are fully operational.
-
-The Streamlit dashboard polls `/health` every 2 seconds on startup and shows a *"ML model is loading…"* spinner instead of a confusing connection error. Once `"ready"` is returned, the dashboard fetches and renders articles normally.
-
-### Ranking — Importance × Recency
-Each article is ranked by `final_score = importance_score × recency_score`, where:
-- `importance_score` comes from the weighted zero-shot classifier output — computed **at fetch time** and stored in the database
-- `recency_score = e^(-λ * hours_since_published)` — computed **at retrieve time**, so it always reflects the article's true age at the moment of the request
-
-`importance_score` is the only score persisted. `recency_score` and `final_score` are computed fresh on every call to `/retrieve` and `/articles` and injected into the response. This means the ranking automatically degrades older articles over time without any reprocessing — an article fetched yesterday will rank lower today than it did yesterday.
-
-### News Sources — RSS feeds
-All sources are fetched via RSS — no API credentials required. Sources are stored in the `sources` database table and loaded at the start of every fetch cycle. The 4 defaults are seeded on startup; additional sources can be added at runtime via `POST /sources` or through the "Add a news source" form in the Streamlit sidebar.
-
-| Source              | Feed                                                        |
-|---------------------|-------------------------------------------------------------|
-| Reddit r/sysadmin   | `https://www.reddit.com/r/sysadmin.rss`                    |
-| Ars Technica        | `https://feeds.arstechnica.com/arstechnica/technology-lab` |
-| The Hacker News     | `https://feeds.feedburner.com/TheHackersNews`               |
-| Tom's Hardware      | `https://www.tomshardware.com/feeds/all`                    |
-
-### Fetch Interval — Every 5 minutes
-The background fetcher runs as a FastAPI startup task, polling all sources every 5 minutes. This provides near real-time updates while avoiding excessive load on the sources.
-
-### RSS Feed Snapshot Model and Coverage
-RSS feeds are static XML files served by the publisher. Each fetch returns a **snapshot** of whatever articles the site currently exposes — typically their 20–50 most recent items. There is no pagination and no way to request articles beyond that window. The number of articles per fetch is entirely controlled by the publisher:
-
-| Source | Articles exposed per fetch |
-|---|---|
-| The Hacker News | ~50 |
-| Tom's Hardware | ~25 |
-| Reddit r/sysadmin | ~25 |
-| Ars Technica | ~20 |
-
-Each fetch cycle, new articles that have appeared since the last fetch will be present in the snapshot while old ones will have dropped off. As long as new articles appear slower than the feed rotates, no articles are missed. For IT news sites, a few articles per hour is typical — well within a 5-minute polling interval.
-
-**What could be missed:** if a site published articles faster than the feed window rotates between fetches, the oldest items could drop off before we catch them. In practice this does not happen for IT news sources. A more robust solution would track the last seen article ID per source and alert if gaps are detected — but this is unnecessary overhead for the current use case.
-
-### Filter Pass Rate by Source
-After the first fetch cycle, the classifier accepted the following proportions per source:
-
-| Source | Fetched | Passed filter | Pass rate |
-|---|---|---|---|
-| The Hacker News | 50 | 48 | 96% |
-| Tom's Hardware | 26 | 17 | 65% |
-| Reddit r/sysadmin | 25 | 23 | 92% |
-| Ars Technica | 20 | 15 | 75% |
-| **Total** | **121** | **103** | **85%** |
-
-These rates reflect how well each source aligns with IT manager relevance. The Hacker News and Reddit r/sysadmin score very high because their content is almost entirely security incidents, outages, and critical bugs — exactly the categories with the highest label weights. Tom's Hardware covers general hardware reviews and product announcements alongside IT-relevant content, so more articles fall below the threshold. Ars Technica similarly mixes general technology coverage with IT-critical reporting.
-
-This also serves as a sanity check on the classifier: a source like The Hacker News passing 96% makes intuitive sense, while a general tech publication passing everything would indicate the filter is too permissive.
-
-### `/retrieve` scope — all filtered articles
-Both articles fetched from RSS sources and articles injected via `/ingest` go through the same `classify_and_save()` pipeline and are stored in the same table. The `/retrieve` endpoint returns **all** articles marked `is_filtered = True`, regardless of their origin.
-
-This is a deliberate design choice: the system is a unified newsfeed — the test harness articles and the live RSS articles are treated equally. The spec says `/retrieve` should return "only the events your system decided to keep", without restricting by source.
-
-One implication: since the background fetcher continuously adds new articles, the result set of `/retrieve` can grow between calls. The **ordering is always deterministic** (scores are fixed at ingestion time), but **membership may grow** as new articles arrive. This is expected behaviour for a live newsfeed system.
-
----
 
 ## Database Layer
 
 ### `app/database.py`
-Sets up the SQLite database using SQLAlchemy. Provides:
-- `engine` — connects to `news.db` at the project root
-- `SessionLocal` — session factory; each request gets its own session
-- `get_db()` — FastAPI dependency that yields a session and closes it after use
+Sets up the PostgreSQL connection using SQLAlchemy. The connection string is read from the `DATABASE_URL` environment variable (default: `postgresql://postgres:postgres@localhost:5432/news`). Provides:
+- `engine`, SQLAlchemy engine bound to the configured database
+- `SessionLocal`, session factory; each request gets its own session
+- `get_db()`, FastAPI dependency that yields a session and closes it after use
 
 ### `app/models.py`
 Defines two SQLAlchemy models.
 
-**`Article`** — stores classified news items. Fields:
+**`Article`:** stores classified news items. Fields:
 
 | Field | Type | Description |
 |------------------|-----------------|------------------------------------------------------|
-| `id` | String (PK) | ID from the source — not auto-generated |
+| `id` | String (PK) | ID from the source, not auto-generated |
 | `source` | String | e.g. `"reddit"`, `"ars-technica"` |
 | `title` | String | Article headline |
 | `body` | Text (optional) | Article content |
 | `published_at` | DateTime | UTC timestamp from the source |
 | `url` | String (optional) | Link to the original article, populated from the RSS `link` field. Stored separately from `id` because some sources (e.g. Tom's Hardware) use non-URL GUIDs as their RSS entry ID. |
-| `importance_score` | Float | Weighted score from zero-shot classifier (0–1) — stored at fetch time |
+| `importance_score` | Float | Weighted score from zero-shot classifier (0–1), stored at fetch time |
 | `is_filtered` | Boolean | `True` if article passed the classifier threshold |
 | `category` | String | Winning label from the classifier |
 | `ingested_at` | DateTime | When the article was received by the system |
 
-**`RSSSourceModel`** — stores registered RSS feed sources. Fields:
+**`RSSSourceModel`:** stores registered RSS feed sources. Fields:
 
 | Field | Type | Description |
 |------------|----------|--------------------------------------|
@@ -326,35 +239,33 @@ Both tables are created automatically at startup via `Base.metadata.create_all()
 
 ### `app/schemas.py`
 Pydantic schemas for request/response validation:
-- `ArticleIngest` — validates incoming data from `POST /ingest`
-- `ArticleResponse` — shapes outgoing data from `GET /retrieve`
-- `SourceCreate` — validates incoming data from `POST /sources` (`name`, `feed_url`)
+- `ArticleIngest`, validates incoming data from `POST /ingest`
+- `ArticleResponse`, shapes outgoing data from `GET /retrieve`
+- `SourceCreate`, validates incoming data from `POST /sources` (`name`, `feed_url`)
 
 `ArticleIngest` and `ArticleResponse` match the API contract shape: `id`, `source`, `title`, `body`, `published_at`.
 
----
 
 ## Fetcher Layer
 
 ### `app/fetcher.py`
-Fetches articles from all registered RSS sources, classifies them, and persists them to the database. Designed for modularity — adding a new source requires only a new subclass with two attributes.
+Fetches articles from all registered RSS sources, classifies them, and persists them to the database. Designed for modularity, adding a new source requires only a new subclass with two attributes.
 
 **Key components:**
 
-- `BaseSource` — abstract base class. Every source must implement `fetch() -> List[ArticleIngest]`.
-- `RSSSource(BaseSource)` — shared RSS parsing logic (GUID extraction, HTML stripping, date parsing, error handling). The RSS `link` field is stored separately as `url` — distinct from `id` — because some sources use non-URL GUIDs as their RSS entry identifier (e.g. Tom's Hardware uses random strings; Reddit uses `t3_<post_id>` formatted URLs that don't resolve to the article).
-- `_DEFAULT_SOURCES` — a list of `(name, feed_url)` tuples for the 4 built-in sources.
-- `seed_default_sources(db_factory)` — inserts the default sources into the `sources` DB table on first startup. Subsequent calls are no-ops (each URL has a unique constraint). Called from `main.py` after `create_all()`.
-- `FetcherService` — runs an async background loop every 5 minutes. `_fetch_all` loads **all** sources from the `sources` table at the start of every cycle (default + user-added), builds an `RSSSource` instance for each, and calls `classify_and_save()` for every fetched article. No code changes are needed to pick up a newly added source — it is included automatically on the next cycle.
+- `BaseSource`, abstract base class. Every source must implement `fetch() -> List[ArticleIngest]`.
+- `RSSSource(BaseSource)`, shared RSS parsing logic (GUID extraction, HTML stripping, date parsing, error handling). The RSS `link` field is stored separately as `url`, distinct from `id`, because some sources use non-URL GUIDs as their RSS entry identifier (e.g. Tom's Hardware uses random strings; Reddit uses `t3_<post_id>` formatted URLs that don't resolve to the article).
+- `_DEFAULT_SOURCES`, a list of `(name, feed_url)` tuples for the 4 built-in sources.
+- `seed_default_sources(db_factory)`, inserts the default sources into the `sources` DB table on first startup. Subsequent calls are no-ops (each URL has a unique constraint). Called from `main.py` after `create_all()`.
+- `FetcherService`, runs an async background loop every 5 minutes. `_fetch_all` loads **all** sources from the `sources` table at the start of every cycle (default + user-added), builds an `RSSSource` instance for each, and calls `classify_and_save()` for every fetched article. No code changes are needed to pick up a newly added source, it is included automatically on the next cycle.
 
 **Design decisions:**
-- **All sources in the DB** — there is no distinction between built-in and user-added sources at runtime. Both are rows in the `sources` table and are treated identically by the fetcher. Adding a source via the UI and adding it to `_DEFAULT_SOURCES` produce exactly the same outcome.
-- Errors in one source are logged and skipped — other sources are unaffected.
-- **Skip-if-unchanged** — before running ML inference, `classify_and_save()` checks whether an article with the same ID already exists in the DB with identical `title` and `body`. If so, the existing record is returned immediately and classification is skipped entirely. If the content has changed, the article is re-classified and updated. This avoids redundant ML inference on every fetch cycle for articles that haven't changed.
+- **All sources in the DB:** there is no distinction between built-in and user-added sources at runtime. Both are rows in the `sources` table and are treated identically by the fetcher. Adding a source via the UI and adding it to `_DEFAULT_SOURCES` produce exactly the same outcome.
+- Errors in one source are logged and skipped, other sources are unaffected.
+- **Skip-if-unchanged:** before running ML inference, `classify_and_save()` checks whether an article with the same ID already exists in the DB with identical `title` and `body`. If so, the existing record is returned immediately and classification is skipped entirely. If the content has changed, the article is re-classified and updated. This avoids redundant ML inference on every fetch cycle for articles that haven't changed.
 - `_fetch_all` runs inside `loop.run_in_executor(None, ...)` so the blocking RSS + ML work happens in a thread pool and never stalls FastAPI's event loop. Incoming requests are handled normally while a fetch cycle is in progress.
 - A 5-second delay is inserted before the first fetch cycle at startup, giving the server time to finish initialising and become reachable before the first (potentially slow) classification run begins.
 
----
 
 ## Classifier Layer
 
@@ -369,8 +280,8 @@ importance_score = sum(confidence[label] × weight[label])
 ```
 
 Since confidences sum to 1.0, the score is naturally bounded:
-- `0.2` — article is entirely general tech news
-- `1.0` — article is entirely a cybersecurity incident or outage
+- `0.2`, article is entirely general tech news
+- `1.0`, article is entirely a cybersecurity incident or outage
 
 Articles with `importance_score > 0.5` are marked `is_filtered = True` and appear in `/retrieve`.
 
@@ -390,102 +301,172 @@ final_score = importance_score × recency_score
 Computed fresh on every `/retrieve` and `/articles` request. Sorting happens in Python after score computation, since the value is not persisted in the database.
 
 **Design decisions:**
-- **Title + body snippet** is fed to the classifier. The article title alone is often insufficient to distinguish real news from community forum posts — a Reddit post titled *"HELP PLEASE! Had my first real email compromise incident this week"* is indistinguishable from a news headline without the body context. The first 300 characters of the body are appended to the title before classification, giving the model enough context to detect the conversational tone of forum posts. 300 characters was chosen as a balance between signal and inference speed.
-- **Lazy model loading** — the model is loaded on the first classification call, keeping app startup fast.
-- **Skip-if-unchanged** — `classify_and_save()` checks for an existing DB record with the same ID before classifying. If `title` and `body` are identical, classification is skipped and the existing record is returned. If the content has changed, the article is re-classified and the record updated. `title + body` was chosen as the change signal since they are the only fields that affect the classification result. The zero-shot model is deterministic at inference time (transformer models run in eval mode with dropout disabled, so identical inputs always produce identical outputs), so strictly speaking re-classifying unchanged content would yield the same scores. The skip-if-unchanged check is a precautionary measure that also avoids unnecessary CPU overhead on each fetch cycle.
-- **Failure handling** — if classification fails, the article is still saved with null scores and `is_filtered = False`. No data is lost.
-- **Shared singleton** — a single `classifier` instance is imported by both the fetcher and the `/ingest` route, so the model is only loaded once.
+- **Title + body snippet** is fed to the classifier. The article title alone is often insufficient to distinguish real news from community forum posts, a Reddit post titled *"HELP PLEASE! Had my first real email compromise incident this week"* is indistinguishable from a news headline without the body context. The first 300 characters of the body are appended to the title before classification, giving the model enough context to detect the conversational tone of forum posts. 300 characters was chosen as a balance between signal and inference speed.
+- **Lazy model loading:** the model is loaded on the first classification call, keeping app startup fast.
+- **Skip-if-unchanged:** `classify_and_save()` checks for an existing DB record with the same ID before classifying. If `title` and `body` are identical, classification is skipped and the existing record is returned. If the content has changed, the article is re-classified and the record updated. `title + body` was chosen as the change signal since they are the only fields that affect the classification result. The zero-shot model is deterministic at inference time (transformer models run in eval mode with dropout disabled, so identical inputs always produce identical outputs), so strictly speaking re-classifying unchanged content would yield the same scores. The skip-if-unchanged check is a precautionary measure that also avoids unnecessary CPU overhead on each fetch cycle.
+- **Failure handling:** if classification fails, the article is still saved with null scores and `is_filtered = False`. No data is lost.
+- **Shared singleton:** a single `classifier` instance is imported by both the fetcher and the `/ingest` route, so the model is only loaded once.
 - **Category** is the label with the highest weighted score, used for display in the UI.
-- **Synchronous `/ingest` — acknowledgment only after classification and DB write** — the `/ingest` endpoint blocks until every article in the batch has been classified and committed to the database before returning `{"status": "ok"}`. This is a deliberate consequence of the single-table PoC design: because there is no landing zone for raw articles, the database only ever holds fully processed records. If the endpoint returned immediately (fire-and-forget) and classification then failed silently in the background, the caller would have no way to know the data was never actually stored — the `"ok"` response would be misleading. By blocking, the acknowledgment is a genuine confirmation that the data is in the database and queryable. In a production system with a two-table design (raw landing table + processed table), the `/ingest` endpoint could return as soon as the raw records are written to the landing table — which is fast because it requires no ML inference. If classification later fails for a batch, the raw records are still available in the landing table and can be reprocessed at any time, so nothing is lost.
+- **Synchronous `/ingest`, acknowledgment only after classification and DB write:** the `/ingest` endpoint blocks until every article in the batch has been classified and committed to the database before returning `{"status": "ok"}`. This is a deliberate consequence of the single-table PoC design: because there is no landing zone for raw articles, the database only ever holds fully processed records. If the endpoint returned immediately (fire-and-forget) and classification then failed silently in the background, the caller would have no way to know the data was never actually stored, the `"ok"` response would be misleading. By blocking, the acknowledgment is a genuine confirmation that the data is in the database and queryable. In a production system with a two-table design (raw landing table + processed table), the `/ingest` endpoint could return as soon as the raw records are written to the landing table, which is fast because it requires no ML inference. If classification later fails for a batch, the raw records are still available in the landing table and can be reprocessed at any time, so nothing is lost.
 
 ## Testing
 
 The project separates **unit tests** (fast, no network, no model) from **integration tests** (real HTTP calls or real ML model).
 
-### Running tests
+### How to run the tests
 
-| Command                                                | What it runs                                         |
-|--------------------------------------------------------|------------------------------------------------------|
-| `pytest tests/test_fetcher.py -v`                     | Fetcher unit tests — mocked feedparser               |
-| `pytest tests/test_routes.py -v`                      | Route unit tests — mocked classifier, in-memory DB   |
-| `pytest tests/test_classifier.py -v`                  | Classifier unit tests — mocked ML pipeline           |
-| `pytest -m "not integration" -v`                      | All unit tests (fast, no network, no model)          |
-| `pytest tests/test_fetcher_integration.py -v`         | Fetcher integration — hits real RSS feeds            |
-| `pytest tests/test_routes_integration.py -v`          | Route integration — real classifier, in-memory DB    |
-| `pytest tests/test_classifier_integration.py -v`      | Classifier integration — loads real ML model         |
-| `pytest -m integration -v`                            | All integration tests                                |
-| `pytest -v`                                           | Full test suite (unit + integration)                 |
+#### Step 1: Activate the virtual environment
+
+```bash
+# Windows
+.venv\Scripts\activate
+
+# macOS/Linux
+source .venv/bin/activate
+```
+
+#### Step 2: Start a PostgreSQL instance for tests
+
+The route tests need a live PostgreSQL database. The easiest way is a one-liner Docker container:
+
+```bash
+docker run -d --name pg_test \
+  -e POSTGRES_PASSWORD=postgres \
+  -e POSTGRES_DB=test_news \
+  -p 5432:5432 \
+  postgres:16
+```
+
+Wait a few seconds for it to be ready, then verify:
+
+```bash
+docker exec pg_test pg_isready -U postgres
+# expected output: /var/run/postgresql:5432 - accepting connections
+```
+
+> If you already have PostgreSQL running locally, just create a `test_news` database: `createdb test_news`
+
+#### Step 3: Set the test database URL
+
+```bash
+# Windows (PowerShell)
+$env:TEST_DATABASE_URL="postgresql://postgres:postgres@localhost:5432/test_news"
+
+# Windows (CMD)
+set TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/test_news
+
+# macOS/Linux
+export TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/test_news
+```
+
+#### Step 4: Run unit tests (fast, ~1s, no network, no ML model)
+
+```bash
+pytest -m "not integration" -v
+```
+
+Expected: **55 passed**
+
+#### Step 5: Run integration tests (slow, ~60s, downloads ML model on first run)
+
+```bash
+pytest -m integration -v
+```
+
+Expected: **18 passed**
+> The first run downloads the ~300MB ML model. Subsequent runs use the local cache and take ~60s.
+
+#### Step 6: Run the full test suite
+
+```bash
+pytest -v
+```
+
+Expected: **73 passed**
+
+#### Step 7: Clean up the test container
+
+```bash
+docker rm -f pg_test
+```
+
+
+### Test command reference
+
+| Command                                                | What it runs                                          |
+|--------------------------------------------------------|-------------------------------------------------------|
+| `pytest tests/test_fetcher.py -v`                     | Fetcher unit tests, mocked feedparser                |
+| `pytest tests/test_routes.py -v`                      | Route unit tests, mocked classifier, PostgreSQL DB   |
+| `pytest tests/test_classifier.py -v`                  | Classifier unit tests, mocked ML pipeline            |
+| `pytest -m "not integration" -v`                      | All unit tests (fast, no network, no model)           |
+| `pytest tests/test_fetcher_integration.py -v`         | Fetcher integration, hits real RSS feeds             |
+| `pytest tests/test_routes_integration.py -v`          | Route integration, real classifier, PostgreSQL DB    |
+| `pytest tests/test_classifier_integration.py -v`      | Classifier integration, loads real ML model          |
+| `pytest -m integration -v`                            | All integration tests                                 |
+| `pytest -v`                                           | Full test suite (unit + integration)                  |
 
 ### Unit tests
 
-**`tests/test_fetcher.py`** — mocks `feedparser`, no HTTP calls. Covers:
+**`tests/test_fetcher.py`:** mocks `feedparser`, no HTTP calls. Covers:
 - `strip_html`, `parse_date`, `RSSSource.fetch()`
 
-**`tests/test_classifier.py`** — mocks the ML pipeline. Covers:
+**`tests/test_classifier.py`:** mocks the ML pipeline. Covers:
 - `_compute_recency`, `_compute_importance`, `classify_and_save`, skip-if-unchanged
-- `classify_and_save` tests no longer assert on `recency_score` or `final_score` — those are not stored, only `importance_score`, `category`, and `is_filtered` are verified
-- Score arrays in `_compute_importance` tests have 6 elements — one per label including "IT community discussion or advice request". Previously they had 5, causing `zip` to silently drop the new label from the weighted sum
+- `classify_and_save` tests no longer assert on `recency_score` or `final_score`, those are not stored, only `importance_score`, `category`, and `is_filtered` are verified
+- Score arrays in `_compute_importance` tests have 6 elements, one per label including "IT community discussion or advice request". Previously they had 5, causing `zip` to silently drop the new label from the weighted sum
 - `TestSkipIfUnchanged` covers all four branches: unchanged article (skips inference), title changed (re-classifies), body changed (re-classifies), no existing record (classifies normally)
 
-**`tests/test_routes.py`** — mocks the classifier, uses an in-memory SQLite database. Covers:
-- `POST /ingest` — acknowledgment, batch count, validation errors, classifier called per article
-- `GET /retrieve` — filtering, ordering, contract response shape (no classification fields leaked)
-- `GET /articles` — full schema with classification fields, consistent ordering with `/retrieve`
-- Sort order tests use `importance_score` and `published_at=now` (recency ≈ 1.0) to control ranking, since `final_score` is no longer stored and ordering happens in Python at request time
+**`tests/test_routes.py`:** mocks the classifier, uses a PostgreSQL test database. Covers:
+- `POST /ingest`, acknowledgment, batch count, validation errors, classifier called per article
+- `GET /retrieve`, filtering, ordering, contract response shape (no classification fields leaked)
+- `GET /articles`, full schema with classification fields, consistent ordering with `/retrieve`
+- Sort order tests use `importance_score` and `published_at=now` (recency ≈ 1.0) to control ranking, since `final_score` is not stored and ordering happens in Python at request time
 - Classification field tests assert that `recency_score` and `final_score` are present and within `(0, 1]` rather than exact values, since they are computed dynamically at request time
 
-#### Note on in-memory SQLite and StaticPool
+#### Test isolation with PostgreSQL
 
-Route tests use `sqlite:///:memory:` for speed and isolation — each test gets a fresh database that disappears when the test ends, with no files left on disk.
-
-The catch: SQLite in-memory databases are **connection-scoped**. Each new connection gets its own private block of RAM, so a second connection sees a completely empty database even if the first one already created tables and inserted data. This matters because FastAPI runs route handlers in a thread pool, which can open a new database connection separate from the one the test fixture used.
-
-The fix is SQLAlchemy's `StaticPool`: instead of a pool of multiple connections, it keeps a single connection and returns it every time one is requested. All parties — the fixture, the route handler, the test assertions — share the same connection, and therefore the same in-memory database.
+All route tests share a single session-scoped PostgreSQL engine (created once in `conftest.py`). Tables are created at the start of the test session and dropped at the end. Each individual test deletes all rows after it runs, giving per-test isolation without the overhead of recreating the schema for every test.
 
 ### Integration tests
 
-**`tests/test_fetcher_integration.py`** — real HTTP requests to each RSS feed. Verifies each source returns valid articles with all required fields.
+**`tests/test_fetcher_integration.py`:** real HTTP requests to each RSS feed. Verifies each source returns valid articles with all required fields.
 
-**`tests/test_classifier_integration.py`** — loads the actual `valhalla/distilbart-mnli-12-3` model. Verifies relevant headlines pass the filter and irrelevant ones don't.
+**`tests/test_classifier_integration.py`:** loads the actual `valhalla/distilbart-mnli-12-3` model. Verifies relevant headlines pass the filter and irrelevant ones don't.
 
-**`tests/test_routes_integration.py`** — real classifier + in-memory DB. Tests the full ingest → classify → retrieve pipeline end-to-end, including determinism and correct filtering.
+**`tests/test_routes_integration.py`:** real classifier + PostgreSQL test database. Tests the full ingest → classify → retrieve pipeline end-to-end, including determinism and correct filtering.
 
 > **Note:** Integration tests require an active internet connection (fetcher) or will trigger model loading (~300MB download on first run, cached after). Run `pytest -m "not integration"` to skip them.
 
----
 
 ## Potential Improvements
 
 ### Classifier
-- **Weighted final score formula** — the current formula `final_score = importance_score × recency_score` gives recency equal multiplicative power. A weighted sum like `0.7 × importance + 0.3 × recency` would let importance dominate ranking more explicitly, keeping older but highly relevant articles more visible.
-- **Longer body context** — the classifier currently uses the first 300 characters of the body. Using more (e.g. 512 tokens worth) would give the model more signal, at the cost of slower inference.
-- **Re-classification without DB wipe** — changing the classifier (new labels, new weights) currently requires deleting the database and re-fetching everything. A `/reclassify` endpoint that reruns the classifier on all stored articles without re-fetching would make iteration faster.
-- **Confidence threshold per label** — instead of a single global importance threshold, each label could have its own minimum confidence to pass, giving finer control over which types of events are surfaced.
+- **Weighted final score formula:** the current formula `final_score = importance_score × recency_score` gives recency equal multiplicative power. A weighted sum like `0.7 × importance + 0.3 × recency` would let importance dominate ranking more explicitly, keeping older but highly relevant articles more visible.
+- **Longer body context:** the classifier currently uses the first 300 characters of the body. Using more (e.g. 512 tokens worth) would give the model more signal, at the cost of slower inference.
+- **Re-classification without DB wipe:** changing the classifier (new labels, new weights) currently requires deleting the database and re-fetching everything. A `/reclassify` endpoint that reruns the classifier on all stored articles without re-fetching would make iteration faster.
+- **Confidence threshold per label:** instead of a single global importance threshold, each label could have its own minimum confidence to pass, giving finer control over which types of events are surfaced.
 
 ### Data sources
-- **Reddit r/sysadmin** — even with the new "IT community discussion" category, some Reddit posts still slip through because their titles resemble news headlines. This source could be removed entirely, or a higher per-source confidence threshold could be applied to reduce noise.
-- **More sources** — adding sources like BleepingComputer, Dark Reading, or vendor security bulletins would improve coverage of cybersecurity and software vulnerability news specifically.
-- **Source removal from the UI** — sources can currently be added via the UI but not removed. A delete button per source row would let the IT manager disable noisy sources without touching the database directly.
-- **Full article scraping** — RSS bodies are often truncated. Scraping the full article text would give the classifier much richer context for difficult cases.
+- **Reddit r/sysadmin:** even with the new "IT community discussion" category, some Reddit posts still slip through because their titles resemble news headlines. This source could be removed entirely, or a higher per-source confidence threshold could be applied to reduce noise.
+- **More sources:** adding sources like BleepingComputer, Dark Reading, or vendor security bulletins would improve coverage of cybersecurity and software vulnerability news specifically.
+- **Source removal from the UI:** sources can currently be added via the UI but not removed. A delete button per source row would let the IT manager disable noisy sources without touching the database directly.
+- **Full article scraping:** RSS bodies are often truncated. Scraping the full article text would give the classifier much richer context for difficult cases.
 
 ### Database
-- **Two-table design** — separate raw ingestion from classified storage (see the existing note in the Database section). This would allow re-classification without data loss and make the ingest endpoint faster.
-- **PostgreSQL** — replacing SQLite with PostgreSQL would support concurrent writes, connection pooling, and horizontal scaling. SQLAlchemy's ORM means this is a one-line change to the connection string.
-- **Retention policy** — old articles accumulate indefinitely. A scheduled cleanup job deleting articles older than N days would keep the database from growing unboundedly.
+- **Two-table design:** separate raw ingestion from classified storage (see the existing note in the Database section). This would allow re-classification without data loss and make the ingest endpoint faster.
+- **Retention policy:** old articles accumulate indefinitely. A scheduled cleanup job deleting articles older than N days would keep the database from growing unboundedly.
 
 ### API & infrastructure
-- **Docker** — containerising the API and Streamlit app would make deployment reproducible and remove the need to manage the virtual environment manually. A `docker-compose.yml` could start both services with a single command and enforce startup order.
-- **Authentication** — the API currently has no authentication. Any process that can reach port 8000 can ingest or retrieve articles. Adding an API key header would be the minimal production requirement.
-- **Alerting** — for a real IT manager use case, high-priority articles (e.g. `importance_score > 0.9`) could trigger a notification (email, Slack, PagerDuty) rather than waiting for the user to check the dashboard.
-- **Pagination** — the `/retrieve` and `/articles` endpoints currently return all matching articles. As the database grows, adding `limit` and `offset` query parameters would keep response sizes manageable.
+- **Authentication:** the API currently has no authentication. Any process that can reach port 8000 can ingest or retrieve articles. Adding an API key header would be the minimal production requirement.
+- **Alerting:** for a real IT manager use case, high-priority articles (e.g. `importance_score > 0.9`) could trigger a notification (email, Slack, PagerDuty) rather than waiting for the user to check the dashboard.
+- **Pagination:** the `/retrieve` and `/articles` endpoints currently return all matching articles. As the database grows, adding `limit` and `offset` query parameters would keep response sizes manageable.
 
 ### UI
-- **Replace Streamlit with a proper frontend** — as noted in the framework section, Streamlit rerenders the entire page on every interaction and does not scale to multiple users. A React or Vue frontend calling the FastAPI directly would provide real-time updates, better performance, and full UI flexibility.
-- **Read/unread state** — the dashboard currently shows all articles on every load. Tracking which articles the user has already seen and only surfacing new ones would make the feed much more actionable.
+- **Replace Streamlit with a proper frontend:** as noted in the framework section, Streamlit rerenders the entire page on every interaction and does not scale to multiple users. A React or Vue frontend calling the FastAPI directly would provide real-time updates, better performance, and full UI flexibility.
+- **Read/unread state:** the dashboard currently shows all articles on every load. Tracking which articles the user has already seen and only surfacing new ones would make the feed much more actionable.
 
----
 
-## Bonus Question — Evaluating Efficiency and Correctness
+## Bonus Question: Evaluating Efficiency and Correctness
 
 ### Correctness
 
@@ -497,16 +478,16 @@ Correctness of the filtering process means two things: **precision** (articles t
 - The integration test suite (`test_classifier_integration.py`) provides a lightweight automated correctness check: it loads the real model and asserts that known high-relevance headlines pass the filter and known irrelevant headlines do not.
 
 **What a more rigorous evaluation would look like:**
-- **Labelled test set** — the most reliable method is a held-out set of articles manually labelled as relevant/irrelevant by a domain expert (an IT manager). Precision and recall can then be computed exactly, and the threshold can be tuned to the desired operating point on the precision-recall curve.
-- **Confusion matrix per category** — beyond binary pass/fail, checking whether the assigned category is correct gives a clearer picture of where the model is weakest. A category that frequently "catches" articles from wrong sources indicates the label definition or weight needs adjustment.
-- **Threshold sensitivity analysis** — plotting pass rate vs. threshold value shows how aggressively the filter behaves and helps identify a threshold that minimises both false positives (noise) and false negatives (missed events).
+- **Labelled test set:** the most reliable method is a held-out set of articles manually labelled as relevant/irrelevant by a domain expert (an IT manager). Precision and recall can then be computed exactly, and the threshold can be tuned to the desired operating point on the precision-recall curve.
+- **Confusion matrix per category:** beyond binary pass/fail, checking whether the assigned category is correct gives a clearer picture of where the model is weakest. A category that frequently "catches" articles from wrong sources indicates the label definition or weight needs adjustment.
+- **Threshold sensitivity analysis:** plotting pass rate vs. threshold value shows how aggressively the filter behaves and helps identify a threshold that minimises both false positives (noise) and false negatives (missed events).
 
 ### Efficiency
 
 Efficiency covers two dimensions: **inference speed** (how fast articles are classified) and **retrieval quality** (how well the ranking serves the user).
 
 **Inference speed:**
-- The current model processes one article at a time on CPU. Measured on a standard laptop, this is roughly 0.5–1.5 seconds per article depending on text length. For a fetch cycle of ~120 articles every 5 minutes, this means classification completes in 1–3 minutes — well within the 5-minute polling interval.
+- The current model processes one article at a time on CPU. Measured on a standard laptop, this is roughly 0.5–1.5 seconds per article depending on text length. For a fetch cycle of ~120 articles every 5 minutes, this means classification completes in 1–3 minutes, well within the 5-minute polling interval.
 - If throughput became a bottleneck, batching multiple articles in a single model call (transformers pipelines support batching natively) or switching to a smaller distilled model would be the first levers to pull.
 
 **Ranking quality:**

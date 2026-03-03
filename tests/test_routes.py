@@ -1,5 +1,5 @@
 """
-Unit tests for the API routes — mocked classifier, in-memory SQLite database.
+Unit tests for the API routes — mocked classifier, PostgreSQL test database.
 No model loading, no network calls. Fast.
 
 Run with: pytest tests/test_routes.py -v
@@ -10,9 +10,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
 
 from app.database import Base, get_db
 from app.models import Article
@@ -28,18 +26,16 @@ _app.include_router(router)
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
-def db():
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    Base.metadata.create_all(bind=engine)
-    Session = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+def db(pg_engine):
+    Session = sessionmaker(autocommit=False, autoflush=False, bind=pg_engine)
     session = Session()
     yield session
     session.close()
-    engine.dispose()
+    # Delete all rows after each test to keep tests isolated
+    with pg_engine.connect() as conn:
+        for table in reversed(Base.metadata.sorted_tables):
+            conn.execute(table.delete())
+        conn.commit()
 
 
 @pytest.fixture
