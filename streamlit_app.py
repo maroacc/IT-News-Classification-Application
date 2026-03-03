@@ -186,7 +186,7 @@ st.title("📡 IT News Feed")
 
 available_sources = sorted({a["source"] for a in articles}) if articles else []
 
-col_cat, col_src, col_sort = st.columns([3, 2, 2])
+col_cat, col_src, col_kw, col_sort = st.columns([3, 2, 2, 2])
 
 with col_cat:
     selected_categories = st.multiselect(
@@ -202,6 +202,9 @@ with col_src:
         default=available_sources,
     )
 
+with col_kw:
+    keyword = st.text_input("Keyword", placeholder="Search titles & body…")
+
 with col_sort:
     sort_by = st.radio(
         "Sort by",
@@ -212,10 +215,12 @@ with col_sort:
 # Filter & sort
 # ─────────────────────────────────────────────────────────────────────────────
 
+kw = keyword.lower()
 filtered = [
     a for a in articles
     if (a.get("category") in selected_categories or not selected_categories)
     and (a.get("source") in selected_sources or not selected_sources)
+    and (not kw or kw in (a.get("title") or "").lower() or kw in (a.get("body") or "").lower())
 ]
 
 if sort_by == "Importance":
