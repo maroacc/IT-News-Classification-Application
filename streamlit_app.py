@@ -233,7 +233,7 @@ else:
         final_score = float(article.get("final_score") or 0.0)
         published_at = article.get("published_at") or ""
 
-        url = article.get("id") or ""
+        url = article.get("url") or ""
         title_md = f"[{title}]({url})" if url.startswith("http") else title
 
         with st.container():

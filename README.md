@@ -82,7 +82,7 @@ It calls `GET /articles` to display classified articles in a card layout. The AP
 - **Source filter** — multiselect to show/hide specific RSS sources
 - **Sort by** — choose between *Final score* (importance × recency, default), *Importance* (classifier score only), or *Most recent* (publication date)
 
-**Article cards** show the category emoji, source, time since publication, title, a 200-character body snippet, and three scores (importance, recency, final) displayed compactly on the right side of the card.
+**Article cards** show the category emoji, source, time since publication, title (as a clickable link to the original article when a URL is available), a 200-character body snippet, and three scores (importance, recency, final) displayed compactly on the right side of the card.
 
 ---
 
@@ -284,6 +284,7 @@ Defines the `Article` SQLAlchemy model (single table). Fields:
 | `title` | String | Article headline |
 | `body` | Text (optional) | Article content |
 | `published_at` | DateTime | UTC timestamp from the source |
+| `url` | String (optional) | Link to the original article, populated from the RSS `link` field. Stored separately from `id` because some sources (e.g. Tom's Hardware) use non-URL GUIDs as their RSS entry ID. |
 | `importance_score` | Float | Weighted score from zero-shot classifier (0–1) |
 | `recency_score` | Float | Exponential decay based on `published_at` (0–1) |
 | `final_score` | Float | `importance * recency`, used for ranking in `/retrieve` |
@@ -308,7 +309,7 @@ Fetches articles from all registered RSS sources, classifies them, and persists 
 **Key components:**
 
 - `BaseSource` — abstract base class. Every source must implement `fetch() -> List[ArticleIngest]`.
-- `RSSSource(BaseSource)` — shared RSS parsing logic (GUID extraction, HTML stripping, date parsing, error handling). All current sources inherit from this.
+- `RSSSource(BaseSource)` — shared RSS parsing logic (GUID extraction, HTML stripping, date parsing, error handling). All current sources inherit from this. The RSS `link` field is stored separately as `url` — distinct from `id` — because some sources use non-URL GUIDs as their RSS entry identifier (e.g. Tom's Hardware uses random strings; Reddit uses `t3_<post_id>` formatted URLs that don't resolve to the article).
 - Concrete sources — each defines only `source_name` and `feed_url`:
   - `RedditSysadminSource`
   - `ArsTechnicaSource`

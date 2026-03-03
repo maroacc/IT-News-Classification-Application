@@ -88,6 +88,7 @@ class RSSSource(BaseSource):
                     title=entry.get("title", "").strip(),
                     body=strip_html(raw_body) or None,
                     published_at=parse_date(entry),
+                    url=entry.get("link") or None,
                 ))
 
             logger.info(f"[{self.source_name}] Fetched {len(articles)} articles")

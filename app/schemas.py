@@ -10,6 +10,7 @@ class ArticleIngest(BaseModel):
     title: str
     body: Optional[str] = None
     published_at: datetime
+    url: Optional[str] = None
 
 
 class ArticleResponse(BaseModel):
@@ -31,3 +32,4 @@ class ArticleFullResponse(ArticleResponse):
     final_score: Optional[float] = None
     category: Optional[str] = None
     ingested_at: Optional[datetime] = None
+    url: Optional[str] = None

@@ -158,6 +158,7 @@ class ClassifierService:
             title=article.title,
             body=article.body,
             published_at=article.published_at,
+            url=article.url,
             importance_score=importance_score,
             recency_score=recency_score,
             final_score=final_score,

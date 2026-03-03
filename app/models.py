@@ -13,6 +13,7 @@ class Article(Base):
     title = Column(String, nullable=False)
     body = Column(Text, nullable=True)            # optional per API contract
     published_at = Column(DateTime, nullable=False)  # UTC timestamp from source
+    url = Column(String, nullable=True)           # link to the original article
 
     # --- Internal classification fields (populated at ingestion time) ---
     importance_score = Column(Float, nullable=True)  # weighted score from zero-shot classifier (0-1)
