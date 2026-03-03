@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Float, Boolean, DateTime, Text
+from sqlalchemy import Column, String, Float, Boolean, DateTime, Text, Integer
 from datetime import datetime, timezone
 from app.database import Base
 
@@ -23,3 +23,11 @@ class Article(Base):
 
     # --- Metadata ---
     ingested_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))  # when we received it
+
+
+class RSSSourceModel(Base):
+    __tablename__ = "sources"
+    id       = Column(Integer, primary_key=True, autoincrement=True)
+    name     = Column(String, nullable=False)           # used as source slug on articles
+    feed_url = Column(String, nullable=False, unique=True)
+    added_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))

@@ -101,36 +101,29 @@ class RSSSource(BaseSource):
 
 
 # ---------------------------------------------------------------------------
-# Concrete sources — add new sources here
+# Default sources — seeded into the DB on first startup
 # ---------------------------------------------------------------------------
 
-class RedditSysadminSource(RSSSource):
-    source_name = "reddit-sysadmin"
-    feed_url = "https://www.reddit.com/r/sysadmin.rss"
-
-
-class ArsTechnicaSource(RSSSource):
-    source_name = "ars-technica"
-    feed_url = "https://feeds.arstechnica.com/arstechnica/technology-lab"
-
-
-class HackerNewsSource(RSSSource):
-    source_name = "the-hacker-news"
-    feed_url = "https://feeds.feedburner.com/TheHackersNews"
-
-
-class TomsHardwareSource(RSSSource):
-    source_name = "toms-hardware"
-    feed_url = "https://www.tomshardware.com/feeds/all"
-
-
-# Registry of active sources — add or remove entries here to enable/disable sources
-SOURCES: List[BaseSource] = [
-    RedditSysadminSource(),
-    ArsTechnicaSource(),
-    HackerNewsSource(),
-    TomsHardwareSource(),
+_DEFAULT_SOURCES = [
+    ("reddit-sysadmin",  "https://www.reddit.com/r/sysadmin.rss"),
+    ("ars-technica",     "https://feeds.arstechnica.com/arstechnica/technology-lab"),
+    ("the-hacker-news",  "https://feeds.feedburner.com/TheHackersNews"),
+    ("toms-hardware",    "https://www.tomshardware.com/feeds/all"),
 ]
+
+
+def seed_default_sources(db_factory) -> None:
+    """Insert the default RSS sources into the DB if they are not already present."""
+    from app.models import RSSSourceModel
+    db: Session = db_factory()
+    try:
+        for name, feed_url in _DEFAULT_SOURCES:
+            exists = db.query(RSSSourceModel).filter(RSSSourceModel.feed_url == feed_url).first()
+            if not exists:
+                db.add(RSSSourceModel(name=name, feed_url=feed_url))
+        db.commit()
+    finally:
+        db.close()
 
 
 # ---------------------------------------------------------------------------
@@ -163,7 +156,21 @@ class FetcherService:
         """Fetch from every registered source and persist classified results."""
         logger.info("Starting fetch cycle")
 
-        for source in SOURCES:
+        # Load all sources from DB (default + user-added)
+        from app.models import RSSSourceModel
+        db: Session = db_factory()
+        try:
+            rows = db.query(RSSSourceModel).all()
+            sources = []
+            for row in rows:
+                s = RSSSource()
+                s.source_name = row.name
+                s.feed_url = row.feed_url
+                sources.append(s)
+        finally:
+            db.close()
+
+        for source in sources:
             articles = source.fetch()  # errors are handled inside fetch()
 
             if not articles:

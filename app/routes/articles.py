@@ -3,14 +3,15 @@ import math
 from datetime import datetime, timezone
 from typing import List
 
-from fastapi import APIRouter, Depends
+import feedparser
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.classifier import classifier, RECENCY_LAMBDA
 from app.database import SessionLocal, get_db
 from app.fetcher import FetcherService
-from app.models import Article
-from app.schemas import ArticleFullResponse, ArticleIngest, ArticleResponse
+from app.models import Article, RSSSourceModel
+from app.schemas import ArticleFullResponse, ArticleIngest, ArticleResponse, SourceCreate
 
 logger = logging.getLogger(__name__)
 
@@ -102,3 +103,23 @@ def articles_full(db: Session = Depends(get_db)):
         ))
     logger.info(f"[/articles] Returning {len(result)} articles with full detail")
     return result
+
+
+@router.post("/sources", status_code=201)
+def add_source(payload: SourceCreate, db: Session = Depends(get_db)):
+    # Duplicate check
+    if db.query(RSSSourceModel).filter(RSSSourceModel.feed_url == payload.feed_url).first():
+        raise HTTPException(status_code=409, detail="This feed URL is already registered.")
+
+    # Validate by fetching
+    feed = feedparser.parse(payload.feed_url)
+    if not feed.entries:
+        raise HTTPException(status_code=422,
+            detail="No articles found at that URL. Please verify the RSS feed URL.")
+
+    # Save
+    source = RSSSourceModel(name=payload.name, feed_url=payload.feed_url)
+    db.add(source)
+    db.commit()
+    logger.info(f"[/sources] Added new source '{payload.name}' ({payload.feed_url})")
+    return {"status": "ok", "name": source.name}

@@ -6,7 +6,7 @@ from fastapi import FastAPI
 
 from app.classifier import classifier
 from app.database import Base, SessionLocal, engine
-from app.fetcher import FetcherService
+from app.fetcher import FetcherService, seed_default_sources
 from app.routes.articles import router
 
 logging.basicConfig(
@@ -21,6 +21,9 @@ async def lifespan(app: FastAPI):
     # --- Startup ---
     logger.info("Creating database tables if they don't exist...")
     Base.metadata.create_all(bind=engine)
+
+    logger.info("Seeding default RSS sources...")
+    seed_default_sources(SessionLocal)
 
     logger.info("Loading ML model in background thread...")
     threading.Thread(target=classifier.load, daemon=True).start()

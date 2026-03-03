@@ -11,6 +11,7 @@ import streamlit as st
 API_URL = "http://localhost:8000/articles"
 FETCH_URL = "http://localhost:8000/fetch"
 HEALTH_URL = "http://localhost:8000/health"
+SOURCES_URL = "http://localhost:8000/sources"
 REFRESH_INTERVAL = 300  # seconds — matches fetcher interval
 
 CATEGORIES = [
@@ -20,13 +21,6 @@ CATEGORIES = [
     "software release or patch",
     "general technology news",
     "IT community discussion or advice request",
-]
-
-SOURCES = [
-    "reddit-sysadmin",
-    "ars-technica",
-    "the-hacker-news",
-    "toms-hardware",
 ]
 
 CATEGORY_EMOJI = {
@@ -162,25 +156,56 @@ with st.sidebar:
     auto_refresh = st.toggle("Auto-refresh (5 min)", value=True)
 
     st.divider()
-    st.subheader("Filters")
+    with st.expander("Add a news source", icon=":material/add:"):
+        with st.form("add_source_form"):
+            new_name = st.text_input("Source name", placeholder="e.g. BleepingComputer")
+            new_url  = st.text_input("RSS feed URL", placeholder="https://...")
+            submitted = st.form_submit_button("Add source", use_container_width=True)
+            if submitted:
+                if new_name and new_url:
+                    try:
+                        resp = requests.post(SOURCES_URL,
+                                             json={"name": new_name, "feed_url": new_url},
+                                             timeout=15)
+                        if resp.status_code == 201:
+                            with st.spinner(f"Fetching articles from '{new_name}'..."):
+                                trigger_fetch()
+                            st.rerun()
+                        else:
+                            st.error(resp.json().get("detail", "Failed to add source."))
+                    except requests.exceptions.ConnectionError:
+                        st.error("Cannot reach the API.")
+                else:
+                    st.warning("Both name and URL are required.")
 
+st.title("📡 IT News Feed")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Filters + sort — inline, above the article list
+# ─────────────────────────────────────────────────────────────────────────────
+
+available_sources = sorted({a["source"] for a in articles}) if articles else []
+
+col_cat, col_src, col_sort = st.columns([3, 2, 2])
+
+with col_cat:
     selected_categories = st.multiselect(
         "Category",
         options=CATEGORIES,
         default=CATEGORIES,
     )
 
+with col_src:
     selected_sources = st.multiselect(
         "Source",
-        options=SOURCES,
-        default=SOURCES,
+        options=available_sources,
+        default=available_sources,
     )
 
-    st.divider()
-
+with col_sort:
     sort_by = st.radio(
         "Sort by",
-        options=["Final score (default)", "Importance", "Most recent"],
+        options=["Final score", "Importance", "Most recent"],
     )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -197,13 +222,7 @@ if sort_by == "Importance":
     filtered.sort(key=lambda a: a.get("importance_score") or 0.0, reverse=True)
 elif sort_by == "Most recent":
     filtered.sort(key=lambda a: a.get("published_at") or "", reverse=True)
-# "Final score (default)" preserves the API order (final_score desc)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Page title + summary metrics
-# ─────────────────────────────────────────────────────────────────────────────
-
-st.title("📡 IT News Feed")
+# "Final score" preserves the API order (final_score desc)
 
 if filtered:
     most_recent_str = max(a.get("published_at") or "" for a in filtered)

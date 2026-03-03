@@ -8,11 +8,11 @@ IT-News-Classification-Application/
 ├── app/
 │   ├── classifier.py     # Zero-shot classifier, scoring, DB persistence
 │   ├── database.py       # SQLite engine, session factory, get_db() dependency
-│   ├── fetcher.py        # RSS fetcher, background loop, source registry
-│   ├── models.py         # SQLAlchemy ORM model (Article table)
+│   ├── fetcher.py        # RSS fetcher, background loop, DB-backed source registry
+│   ├── models.py         # SQLAlchemy ORM models (Article, RSSSourceModel tables)
 │   ├── schemas.py        # Pydantic schemas for API input/output validation
 │   └── routes/
-│       └── articles.py   # /ingest, /retrieve, /articles route handlers
+│       └── articles.py   # /ingest, /retrieve, /articles, /sources route handlers
 ├── tests/
 │   ├── test_classifier.py            # Classifier unit tests
 │   ├── test_classifier_integration.py
@@ -59,8 +59,9 @@ uvicorn main:app --reload
 
 On startup the app will:
 1. Create `news.db` at the project root (if it doesn't exist)
-2. Start a background fetcher that polls all RSS sources every 5 minutes
-3. Classify and store each article automatically
+2. Seed the 4 default RSS sources into the `sources` table (skipped if already present)
+3. Start a background fetcher that polls all sources every 5 minutes
+4. Classify and store each article automatically
 
 The API will be available at `http://localhost:8000`.
 Interactive API docs (Swagger UI) at `http://localhost:8000/docs`.
@@ -79,8 +80,9 @@ It calls `GET /articles` to display classified articles in a card layout. The AP
 - **Refresh now** — triggers an immediate fetch and classification cycle
 - **Auto-refresh** — toggle to automatically reload the feed every 5 minutes
 - **Category filter** — multiselect to show/hide specific categories
-- **Source filter** — multiselect to show/hide specific RSS sources
+- **Source filter** — multiselect derived from sources present in the current article set; updates automatically when new sources produce articles
 - **Sort by** — choose between *Final score* (importance × recency, default), *Importance* (classifier score only), or *Most recent* (publication date)
+- **Add a news source** — expandable form in the sidebar; enter a name and RSS feed URL to register a new source. The source is validated (feed must return at least one article) and persisted to the database. It will appear in the feed after the next fetch cycle.
 
 **Article cards** show the category emoji, source, time since publication, title (as a clickable link to the original article when a URL is available), a 200-character body snippet, and three scores (importance, recency, final) displayed compactly on the right side of the card.
 
@@ -131,6 +133,25 @@ Returns all articles that passed the relevance filter, sorted by score descendin
 
 ### `GET /articles`
 Same filtering and ordering as `/retrieve` but returns the full internal schema including classification fields. Intended for the UI.
+
+---
+
+### `POST /sources`
+Register a new RSS feed source. The feed URL is validated by fetching it — the request is rejected if no articles are returned. Duplicate feed URLs are rejected with HTTP 409.
+
+**Request body:**
+```json
+{ "name": "BleepingComputer", "feed_url": "https://www.bleepingcomputer.com/feed/" }
+```
+
+**Response** — HTTP 201:
+```json
+{ "status": "ok", "name": "BleepingComputer" }
+```
+
+**Error responses:**
+- `409 Conflict` — feed URL is already registered
+- `422 Unprocessable Entity` — URL did not return any articles
 
 **Response** — JSON array with additional fields:
 ```json
@@ -216,7 +237,7 @@ Each article is ranked by `final_score = importance_score × recency_score`, whe
 `importance_score` is the only score persisted. `recency_score` and `final_score` are computed fresh on every call to `/retrieve` and `/articles` and injected into the response. This means the ranking automatically degrades older articles over time without any reprocessing — an article fetched yesterday will rank lower today than it did yesterday.
 
 ### News Sources — RSS feeds
-All sources (Reddit, Ars Technica, The Hacker News, Tom's Hardware) are fetched via RSS feeds — no API credentials required, and RSS is universally supported. The fetcher uses a **base class pattern** so new sources can be added by implementing a single `fetch()` method, with no changes to existing code.
+All sources are fetched via RSS — no API credentials required. Sources are stored in the `sources` database table and loaded at the start of every fetch cycle. The 4 defaults are seeded on startup; additional sources can be added at runtime via `POST /sources` or through the "Add a news source" form in the Streamlit sidebar.
 
 | Source              | Feed                                                        |
 |---------------------|-------------------------------------------------------------|
@@ -275,7 +296,9 @@ Sets up the SQLite database using SQLAlchemy. Provides:
 - `get_db()` — FastAPI dependency that yields a session and closes it after use
 
 ### `app/models.py`
-Defines the `Article` SQLAlchemy model (single table). Fields:
+Defines two SQLAlchemy models.
+
+**`Article`** — stores classified news items. Fields:
 
 | Field | Type | Description |
 |------------------|-----------------|------------------------------------------------------|
@@ -290,12 +313,24 @@ Defines the `Article` SQLAlchemy model (single table). Fields:
 | `category` | String | Winning label from the classifier |
 | `ingested_at` | DateTime | When the article was received by the system |
 
+**`RSSSourceModel`** — stores registered RSS feed sources. Fields:
+
+| Field | Type | Description |
+|------------|----------|--------------------------------------|
+| `id` | Integer (PK) | Auto-incremented primary key |
+| `name` | String | Source slug used on article records |
+| `feed_url` | String (unique) | Full RSS feed URL |
+| `added_at` | DateTime | When the source was registered |
+
+Both tables are created automatically at startup via `Base.metadata.create_all()`. The 4 default sources are seeded into `RSSSourceModel` on first startup by `seed_default_sources()` in `fetcher.py`.
+
 ### `app/schemas.py`
 Pydantic schemas for request/response validation:
 - `ArticleIngest` — validates incoming data from `POST /ingest`
 - `ArticleResponse` — shapes outgoing data from `GET /retrieve`
+- `SourceCreate` — validates incoming data from `POST /sources` (`name`, `feed_url`)
 
-Both match the API contract shape: `id`, `source`, `title`, `body`, `published_at`.
+`ArticleIngest` and `ArticleResponse` match the API contract shape: `id`, `source`, `title`, `body`, `published_at`.
 
 ---
 
@@ -307,16 +342,13 @@ Fetches articles from all registered RSS sources, classifies them, and persists 
 **Key components:**
 
 - `BaseSource` — abstract base class. Every source must implement `fetch() -> List[ArticleIngest]`.
-- `RSSSource(BaseSource)` — shared RSS parsing logic (GUID extraction, HTML stripping, date parsing, error handling). All current sources inherit from this. The RSS `link` field is stored separately as `url` — distinct from `id` — because some sources use non-URL GUIDs as their RSS entry identifier (e.g. Tom's Hardware uses random strings; Reddit uses `t3_<post_id>` formatted URLs that don't resolve to the article).
-- Concrete sources — each defines only `source_name` and `feed_url`:
-  - `RedditSysadminSource`
-  - `ArsTechnicaSource`
-  - `HackerNewsSource`
-  - `TomsHardwareSource`
-- `SOURCES` — a list acting as the source registry. Enable or disable a source by adding or removing it from this list.
-- `FetcherService` — runs an async background loop every 5 minutes, calling `classify_and_save()` for each fetched article.
+- `RSSSource(BaseSource)` — shared RSS parsing logic (GUID extraction, HTML stripping, date parsing, error handling). The RSS `link` field is stored separately as `url` — distinct from `id` — because some sources use non-URL GUIDs as their RSS entry identifier (e.g. Tom's Hardware uses random strings; Reddit uses `t3_<post_id>` formatted URLs that don't resolve to the article).
+- `_DEFAULT_SOURCES` — a list of `(name, feed_url)` tuples for the 4 built-in sources.
+- `seed_default_sources(db_factory)` — inserts the default sources into the `sources` DB table on first startup. Subsequent calls are no-ops (each URL has a unique constraint). Called from `main.py` after `create_all()`.
+- `FetcherService` — runs an async background loop every 5 minutes. `_fetch_all` loads **all** sources from the `sources` table at the start of every cycle (default + user-added), builds an `RSSSource` instance for each, and calls `classify_and_save()` for every fetched article. No code changes are needed to pick up a newly added source — it is included automatically on the next cycle.
 
 **Design decisions:**
+- **All sources in the DB** — there is no distinction between built-in and user-added sources at runtime. Both are rows in the `sources` table and are treated identically by the fetcher. Adding a source via the UI and adding it to `_DEFAULT_SOURCES` produce exactly the same outcome.
 - Errors in one source are logged and skipped — other sources are unaffected.
 - **Skip-if-unchanged** — before running ML inference, `classify_and_save()` checks whether an article with the same ID already exists in the DB with identical `title` and `body`. If so, the existing record is returned immediately and classification is skipped entirely. If the content has changed, the article is re-classified and updated. This avoids redundant ML inference on every fetch cycle for articles that haven't changed.
 - `_fetch_all` runs inside `loop.run_in_executor(None, ...)` so the blocking RSS + ML work happens in a thread pool and never stalls FastAPI's event loop. Incoming requests are handled normally while a fetch cycle is in progress.
@@ -387,7 +419,7 @@ The project separates **unit tests** (fast, no network, no model) from **integra
 ### Unit tests
 
 **`tests/test_fetcher.py`** — mocks `feedparser`, no HTTP calls. Covers:
-- `strip_html`, `parse_date`, `RSSSource.fetch()`, `SOURCES` registry
+- `strip_html`, `parse_date`, `RSSSource.fetch()`
 
 **`tests/test_classifier.py`** — mocks the ML pipeline. Covers:
 - `_compute_recency`, `_compute_importance`, `classify_and_save`, skip-if-unchanged
@@ -433,7 +465,7 @@ The fix is SQLAlchemy's `StaticPool`: instead of a pool of multiple connections,
 ### Data sources
 - **Reddit r/sysadmin** — even with the new "IT community discussion" category, some Reddit posts still slip through because their titles resemble news headlines. This source could be removed entirely, or a higher per-source confidence threshold could be applied to reduce noise.
 - **More sources** — adding sources like BleepingComputer, Dark Reading, or vendor security bulletins would improve coverage of cybersecurity and software vulnerability news specifically.
-- **Source management from the UI** — currently, adding or removing RSS sources requires editing `app/fetcher.py` and restarting the server. A source management page in the UI would let the IT manager add any RSS feed URL, name it, and remove sources they find noisy — all without touching code.
+- **Source removal from the UI** — sources can currently be added via the UI but not removed. A delete button per source row would let the IT manager disable noisy sources without touching the database directly.
 - **Full article scraping** — RSS bodies are often truncated. Scraping the full article text would give the classifier much richer context for difficult cases.
 
 ### Database

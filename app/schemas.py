@@ -33,3 +33,8 @@ class ArticleFullResponse(ArticleResponse):
     category: Optional[str] = None
     ingested_at: Optional[datetime] = None
     url: Optional[str] = None
+
+
+class SourceCreate(BaseModel):
+    name: str
+    feed_url: str
