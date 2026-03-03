@@ -364,6 +364,7 @@ Computed fresh on every `/retrieve` and `/articles` request. Sorting happens in 
 - **Failure handling** — if classification fails, the article is still saved with null scores and `is_filtered = False`. No data is lost.
 - **Shared singleton** — a single `classifier` instance is imported by both the fetcher and the `/ingest` route, so the model is only loaded once.
 - **Category** is the label with the highest weighted score, used for display in the UI.
+- **Synchronous `/ingest` — acknowledgment only after classification and DB write** — the `/ingest` endpoint blocks until every article in the batch has been classified and committed to the database before returning `{"status": "ok"}`. This is a deliberate consequence of the single-table PoC design: because there is no landing zone for raw articles, the database only ever holds fully processed records. If the endpoint returned immediately (fire-and-forget) and classification then failed silently in the background, the caller would have no way to know the data was never actually stored — the `"ok"` response would be misleading. By blocking, the acknowledgment is a genuine confirmation that the data is in the database and queryable. In a production system with a two-table design (raw landing table + processed table), the `/ingest` endpoint could return as soon as the raw records are written to the landing table — which is fast because it requires no ML inference. If classification later fails for a batch, the raw records are still available in the landing table and can be reprocessed at any time, so nothing is lost.
 
 ## Testing
 
@@ -449,3 +450,33 @@ The fix is SQLAlchemy's `StaticPool`: instead of a pool of multiple connections,
 ### UI
 - **Replace Streamlit with a proper frontend** — as noted in the framework section, Streamlit rerenders the entire page on every interaction and does not scale to multiple users. A React or Vue frontend calling the FastAPI directly would provide real-time updates, better performance, and full UI flexibility.
 - **Read/unread state** — the dashboard currently shows all articles on every load. Tracking which articles the user has already seen and only surfacing new ones would make the feed much more actionable.
+
+---
+
+## Bonus Question — Evaluating Efficiency and Correctness
+
+### Correctness
+
+Correctness of the filtering process means two things: **precision** (articles that passed the filter are genuinely relevant) and **recall** (relevant articles are not being dropped).
+
+**What was done in this project:**
+- Two analysis notebooks (`analysis.ipynb`, `analysis_new_category.ipynb`) were used to evaluate the classifier on real fetched data. They cover score distributions, per-category article samples, borderline cases (articles near the 0.5 threshold), and pass rates per source.
+- Manual inspection revealed a systematic error: Reddit r/sysadmin posts were being misclassified as high-priority news because the model had no appropriate bucket for community forum content. This led to the addition of the "IT community discussion or advice request" label (weight 0.15), which brought those posts below the filter threshold. This is an example of **qualitative error analysis** driving a classifier improvement.
+- The integration test suite (`test_classifier_integration.py`) provides a lightweight automated correctness check: it loads the real model and asserts that known high-relevance headlines pass the filter and known irrelevant headlines do not.
+
+**What a more rigorous evaluation would look like:**
+- **Labelled test set** — the most reliable method is a held-out set of articles manually labelled as relevant/irrelevant by a domain expert (an IT manager). Precision and recall can then be computed exactly, and the threshold can be tuned to the desired operating point on the precision-recall curve.
+- **Confusion matrix per category** — beyond binary pass/fail, checking whether the assigned category is correct gives a clearer picture of where the model is weakest. A category that frequently "catches" articles from wrong sources indicates the label definition or weight needs adjustment.
+- **Threshold sensitivity analysis** — plotting pass rate vs. threshold value shows how aggressively the filter behaves and helps identify a threshold that minimises both false positives (noise) and false negatives (missed events).
+
+### Efficiency
+
+Efficiency covers two dimensions: **inference speed** (how fast articles are classified) and **retrieval quality** (how well the ranking serves the user).
+
+**Inference speed:**
+- The current model processes one article at a time on CPU. Measured on a standard laptop, this is roughly 0.5–1.5 seconds per article depending on text length. For a fetch cycle of ~120 articles every 5 minutes, this means classification completes in 1–3 minutes — well within the 5-minute polling interval.
+- If throughput became a bottleneck, batching multiple articles in a single model call (transformers pipelines support batching natively) or switching to a smaller distilled model would be the first levers to pull.
+
+**Ranking quality:**
+- The `final_score = importance_score × recency_score` formula means a highly important article published 48 hours ago scores the same as a moderately important article published just now. Whether this trade-off is correct depends on the use case.
+- A practical way to evaluate ranking quality is **position-weighted user feedback**: if an IT manager consistently opens articles ranked 5–10 rather than 1–4, it suggests the ranking is not well-calibrated. Click-through position data, even from a single user over a few weeks, would surface systematic ranking errors without needing a formal labelling exercise.
